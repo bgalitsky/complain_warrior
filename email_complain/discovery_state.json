@@ -1,0 +1,39 @@
+{
+  "CASE-20260114-210220": {
+    "tag": "CASE-20260114-210220",
+    "thread_id": "19bbdac3e6c8124a",
+    "seed_subject": "FORWARD_TO=customercare@united.com,customer.relations@aa.com;CC=airconsumer@dot.gov;TAG=CASE-20260114-210220 | Complaint: Flight delay reimbursement request (Reservation Q7K2LM)",
+    "human_subject": "",
+    "complaint_body": "",
+    "forward_to": [
+      "customercare@united.com",
+      "customer.relations@aa.com"
+    ],
+    "cc": [
+      "airconsumer@dot.gov"
+    ],
+    "last_handled_msg_id": "19bbdb330e04db90",
+    "created_at": "",
+    "docs": [
+      "C:/Users/User/Downloads/entropy-4073642-review.pdf"
+    ]
+  },
+  "CASE-20260115-205939": {
+    "tag": "CASE-20260115-205939",
+    "thread_id": "19bc2d02b6073ca9",
+    "seed_subject": "FORWARD_TO=customerrelations@wnco.com,refunds@southwest.com;CC=airconsumer@dot.gov,complaints@bbb.org;TAG=CASE-20260115-205939 | Complaint: Flight delay reimbursement request (Reservation Q7K2LM)",
+    "human_subject": "Complaint: Flight delay reimbursement request (Reservation Q7K2LM)",
+    "complaint_body": "Dear Southwest Customer Relations,\n\nI am writing to file a formal complaint regarding a recent Southwest flight disruption.\n\nSummary:\n- Flight delayed by more than 4 hours (operational issues).\n- I missed a prepaid hotel reservation and an important meeting.\n- No meaningful assistance was offered at the airport.\n\nRequested remedy:\n1) Reimbursement for hotel cancellation fee: $180\n2) A reasonable travel credit for the disruption\n\nI can provide receipts and confirmation emails upon request.\n\nSincerely,\nBoris Galitsky\nbgalitsky@hotmail.com\nReservation: Q7K2LM",
+    "forward_to": [
+      "customerrelations@wnco.com",
+      "refunds@southwest.com"
+    ],
+    "cc": [
+      "airconsumer@dot.gov",
+      "complaints@bbb.org"
+    ],
+    "last_handled_msg_id": null,
+    "created_at": "2026-01-15T20:59:41",
+    "docs": []
+  }
+}
