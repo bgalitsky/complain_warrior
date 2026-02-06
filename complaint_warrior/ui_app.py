@@ -38,6 +38,42 @@ class ComplaintWarriorUI:
         self.txt_log.see("end")
         self.root.update_idletasks()
 
+    def on_load_inbound(self):
+        cid = self.selected_complaint_id
+        tid = self.selected_thread_id
+
+        if not cid or not tid:
+            messagebox.showwarning(
+                "No selection",
+                "Select a complaint and a thread first."
+            )
+            return
+
+        try:
+            view = self.manager.load_latest_inbound_view(cid, tid)
+
+            if not view:
+                messagebox.showinfo(
+                    "No reply",
+                    "No inbound reply found for this thread."
+                )
+                return
+
+            # Show inbound message in timeline for now
+            self.txt_timeline.insert(
+                "end",
+                "\n--- INBOUND FROM CUSTOMER SUPPORT ---\n"
+                f"From: {view.get('from')}\n"
+                f"Subject: {view.get('subject')}\n\n"
+                f"{view.get('body')}\n"
+            )
+            self.txt_timeline.see("end")
+
+            self.log("Inbound reply loaded.")
+
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
     def _build_ui(self):
         paned = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
         paned.pack(fill="both", expand=True)
@@ -114,6 +150,11 @@ class ComplaintWarriorUI:
         # Draft selector + send
         sendrow = ttk.Frame(tright)
         sendrow.pack(fill="x", pady=(0, 6))
+        ttk.Button(
+            sendrow,
+            text="Load reply from Gmail",
+            command=self.on_load_inbound  # ← must match method name
+        ).pack(side="left", padx=6)
 
         ttk.Label(sendrow, text="Draft to send:").pack(side="left")
         self.cmb_drafts = ttk.Combobox(sendrow, state="readonly", width=75, values=[])

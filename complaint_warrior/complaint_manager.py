@@ -248,6 +248,7 @@ class ThreadState:
     parent_thread_id: Optional[str] = None
 
     last_handled_msg_id: Optional[str] = None
+    last_inbound: Optional[Dict[str, Any]] = None  # cached view of latest inbound
     timeline: List[Dict[str, str]] = None
 
     last_decision: Optional[Dict[str, Any]] = None
@@ -291,6 +292,7 @@ class ComplaintState:
                 status=t.get("status", "open"),
                 parent_thread_id=t.get("parent_thread_id"),
                 last_handled_msg_id=t.get("last_handled_msg_id"),
+                last_inbound=t.get("last_inbound"),
                 timeline=t.get("timeline", []) or [],
                 last_decision=t.get("last_decision"),
                 last_draft=t.get("last_draft"),
@@ -654,112 +656,182 @@ Subject suggestion: {draft_email.get('subject','')}
             return m
         return None
 
-    def _thread_transcript(self, thread_id: str) -> str:
+
+    def _newest_inbound_any(self, thread_id: str) -> Optional[dict]:
+        """
+        Returns newest inbound message in a thread, even if it was already marked processed.
+        We still skip Gmail 'SENT' items (outbound from you).
+        """
         th = get_thread(self.service, thread_id)
         messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
-        out = []
-        for m in messages:
-            payload = m.get("payload", {}) or {}
-            headers = payload.get("headers", []) or []
-            subj = get_header(headers, "Subject")
-            frm = get_header(headers, "From")
-            date = get_header(headers, "Date")
-            txt = decode_best_effort_text(payload).strip()
-            out.append(f"---\nFrom: {frm}\nDate: {date}\nSubject: {subj}\n\n{txt}\n")
-        return "\n".join(out)
+        for m in reversed(messages):
+            labels = m.get("labelIds") or []
+            if "SENT" in labels:
+                continue
+            return m
+        return None
 
-    def _handle_inbound(self, complaint_id: str, thread_id: str, msg: dict):
+    def load_latest_inbound_view(self, complaint_id: str, thread_id: str) -> Optional[Dict[str, Any]]:
+        """
+        UI helper: fetch latest inbound message text (does not mark processed and does not change last_handled_msg_id).
+        Saves a cached copy into ThreadState.last_inbound for convenience.
+        """
         with self._lock:
             cs = self.complaints[complaint_id]
             ts = cs.threads[thread_id]
 
-        transcript = self._thread_transcript(thread_id)
+        msg = self._newest_inbound_any(thread_id)
+        if not msg:
+            return None
 
         payload = msg.get("payload", {}) or {}
         headers = payload.get("headers", []) or []
         frm = get_header(headers, "From")
         subj = get_header(headers, "Subject")
+        date = get_header(headers, "Date")
+        labels = msg.get("labelIds") or []
+        body = decode_best_effort_text(payload).strip()
 
-        user_data = {
-            "available_docs": [os.path.basename(p) for p in cs.docs if os.path.exists(p)],
-            "evidence_pack_pdf": os.path.basename(cs.evidence_pack_pdf) if cs.evidence_pack_pdf else None,
+        view = {
+            "message_id": msg.get("id"),
+            "from": frm,
+            "subject": subj,
+            "date": date,
+            "labels": labels,
+            "body": body,
         }
 
-        context = {
-            "complaint_id": cs.complaint_id,
-            "thread_label": ts.label,
-            "thread_status": ts.status,
-            "safe_mode": cs.safe_mode,
-            "user_email": cs.user_email,
-            "user_name": cs.user_name,
-            "auto_send_policy": cs.auto_send_policy,
-        }
-
-        self.log_cb(f"Inbound detected: complaint={complaint_id} thread={thread_id} from={frm}")
-
-        decision: AgentDecision = self.tp.decide_next(
-            original_complaint=cs.complaint_professional,
-            thread_transcript=transcript,
-            user_data=user_data,
-            context=context,
-            log_cb=self.log_cb,
-        )
-
-        # Store decision + drafts on this thread
         with self._lock:
-            ts.last_decision = asdict(decision)
-            ts.drafts = list(decision.drafts or [])
-            ts.last_draft = (ts.drafts[0] if ts.drafts else None)
-            ts.status = decision.thread_status
-            ts.add_event("inbound", f"From {frm} / subj={subj}")
-            ts.add_event("decision", f"{decision.action} ({decision.confidence:.2f})")
-            ts.last_handled_msg_id = msg.get("id")
+            ts.last_inbound = view
+            ts.add_event("inbound_view", f"Viewed inbound msg={view.get('message_id')} subj={subj}")
             self._save_state()
 
-        # Mark inbound as processed to avoid loops
-        add_label(self.service, msg["id"], self.processed_label_id)
+        return view
 
-        # Possibly auto-send on this thread
-        self._maybe_auto_send_thread(complaint_id, thread_id, reason="inbound_decision")
+    def draft_reply_now(self, complaint_id: str, thread_id: str) -> Optional[Dict[str, Any]]:
+        """
+        UI helper: force an immediate GPT decision/draft from the newest *unprocessed* inbound.
+        Equivalent to waiting for the poller, but on-demand.
+        Returns the decision dict if a draft was created, otherwise None.
+        """
+        with self._lock:
+            cs = self.complaints[complaint_id]
+            ts = cs.threads[thread_id]
 
-        # AUTO-SPAWN new agent threads if GPT wants it
-        if decision.action in ("spawn_mediator_agent", "escalate"):
+        msg = self._newest_unprocessed_inbound(thread_id, ts.last_handled_msg_id)
+        if not msg:
+            return None
+
+        self._handle_inbound(complaint_id, thread_id, msg)
+        with self._lock:
+            return cs.threads[thread_id].last_decision
+
+    def _thread_transcript(self, thread_id: str) -> str:
+            th = get_thread(self.service, thread_id)
+            messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
+            out = []
+            for m in messages:
+                payload = m.get("payload", {}) or {}
+                headers = payload.get("headers", []) or []
+                subj = get_header(headers, "Subject")
+                frm = get_header(headers, "From")
+                date = get_header(headers, "Date")
+                txt = decode_best_effort_text(payload).strip()
+                out.append(f"---\nFrom: {frm}\nDate: {date}\nSubject: {subj}\n\n{txt}\n")
+            return "\n".join(out)
+
+    def _handle_inbound(self, complaint_id: str, thread_id: str, msg: dict):
             with self._lock:
                 cs = self.complaints[complaint_id]
-                current_label = cs.threads[thread_id].label
+                ts = cs.threads[thread_id]
 
-            seen = set()
-            for d in (decision.drafts or []):
-                agent = (d.get("to_hint") or "").strip()
-                if not agent:
-                    continue
-                if agent == current_label:
-                    continue
-                if agent in seen:
-                    continue
-                seen.add(agent)
+            transcript = self._thread_transcript(thread_id)
 
-                existing_tid = self._find_thread_by_label(cs, agent)
-                if existing_tid:
-                    with self._lock:
-                        cs.threads[existing_tid].add_event("spawn_skipped", "Thread already exists for this agent label")
-                        self._save_state()
-                    continue
+            payload = msg.get("payload", {}) or {}
+            headers = payload.get("headers", []) or []
+            frm = get_header(headers, "From")
+            subj = get_header(headers, "Subject")
 
-                new_tid = self.create_agent_thread_seed(
-                    complaint_id=complaint_id,
-                    agent_label=agent,
-                    parent_thread_id=thread_id,
-                    draft_email={"subject": d.get("subject", ""), "body": d.get("body", "")},
-                )
+            user_data = {
+                "available_docs": [os.path.basename(p) for p in cs.docs if os.path.exists(p)],
+                "evidence_pack_pdf": os.path.basename(cs.evidence_pack_pdf) if cs.evidence_pack_pdf else None,
+            }
 
-                # preload drafts into spawned thread
+            context = {
+                "complaint_id": cs.complaint_id,
+                "thread_label": ts.label,
+                "thread_status": ts.status,
+                "safe_mode": cs.safe_mode,
+                "user_email": cs.user_email,
+                "user_name": cs.user_name,
+                "auto_send_policy": cs.auto_send_policy,
+            }
+
+            self.log_cb(f"Inbound detected: complaint={complaint_id} thread={thread_id} from={frm}")
+
+            decision: AgentDecision = self.tp.decide_next(
+                original_complaint=cs.complaint_professional,
+                thread_transcript=transcript,
+                user_data=user_data,
+                context=context,
+                log_cb=self.log_cb,
+            )
+
+            # Store decision + drafts on this thread
+            with self._lock:
+                ts.last_decision = asdict(decision)
+                ts.drafts = list(decision.drafts or [])
+                ts.last_draft = (ts.drafts[0] if ts.drafts else None)
+                ts.status = decision.thread_status
+                ts.add_event("inbound", f"From {frm} / subj={subj}")
+                ts.add_event("decision", f"{decision.action} ({decision.confidence:.2f})")
+                ts.last_handled_msg_id = msg.get("id")
+                self._save_state()
+
+            # Mark inbound as processed to avoid loops
+            add_label(self.service, msg["id"], self.processed_label_id)
+
+            # Possibly auto-send on this thread
+            self._maybe_auto_send_thread(complaint_id, thread_id, reason="inbound_decision")
+
+            # AUTO-SPAWN new agent threads if GPT wants it
+            if decision.action in ("spawn_mediator_agent", "escalate"):
                 with self._lock:
-                    new_ts = cs.threads[new_tid]
-                    new_ts.drafts = [d]
-                    new_ts.last_draft = d
-                    new_ts.add_event("draft_ready", "Draft imported from parent decision")
-                    self._save_state()
+                    cs = self.complaints[complaint_id]
+                    current_label = cs.threads[thread_id].label
 
-                # Possibly auto-send spawned thread
-                self._maybe_auto_send_thread(complaint_id, new_tid, reason="spawned_thread")
+                seen = set()
+                for d in (decision.drafts or []):
+                    agent = (d.get("to_hint") or "").strip()
+                    if not agent:
+                        continue
+                    if agent == current_label:
+                        continue
+                    if agent in seen:
+                        continue
+                    seen.add(agent)
+
+                    existing_tid = self._find_thread_by_label(cs, agent)
+                    if existing_tid:
+                        with self._lock:
+                            cs.threads[existing_tid].add_event("spawn_skipped", "Thread already exists for this agent label")
+                            self._save_state()
+                        continue
+
+                    new_tid = self.create_agent_thread_seed(
+                        complaint_id=complaint_id,
+                        agent_label=agent,
+                        parent_thread_id=thread_id,
+                        draft_email={"subject": d.get("subject", ""), "body": d.get("body", "")},
+                    )
+
+                    # preload drafts into spawned thread
+                    with self._lock:
+                        new_ts = cs.threads[new_tid]
+                        new_ts.drafts = [d]
+                        new_ts.last_draft = d
+                        new_ts.add_event("draft_ready", "Draft imported from parent decision")
+                        self._save_state()
+
+                    # Possibly auto-send spawned thread
+                    self._maybe_auto_send_thread(complaint_id, new_tid, reason="spawned_thread")
