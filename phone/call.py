@@ -97,41 +97,73 @@ def fetch_transcript(base_url: str, call_sid: str) -> str:
             data = json.loads(r.read().decode("utf-8"))
         return data.get("transcript", "") or ""
 
+import json
+import time
+from urllib.request import urlopen
+
+import json
+import time
+from urllib.request import urlopen
+
 def wait_for_transcript(
-            base_url: str,
-            call_sid: str,
-            min_chars: int = 40,
-            idle_seconds: int = 10,
-            overall_timeout: int = 240
-    ) -> str:
-        """
-        Poll /wait_result until:
-          - transcript has >= min_chars AND is idle for idle_seconds, OR
-          - overall_timeout reached
-        Returns transcript string.
-        """
-        base = base_url.rstrip("/")
-        deadline = time.time() + overall_timeout
-        transcript = ""
+    base_url: str,
+    call_sid: str,
+    overall_timeout: int = 300,
+    require_inbound: bool = True,
+    idle_seconds_after_inbound: int = 6,
+):
+    """
+    Waits until:
+      - inbound_track appears (if require_inbound=True), then
+      - transcript becomes idle for idle_seconds_after_inbound
+    Returns transcript string.
+    """
 
-        while time.time() < deadline:
-            url = (f"{base}/wait_result/{call_sid}"
-                   f"?timeout=30&min_chars={min_chars}&idle={idle_seconds}")
-            try:
-                with urlopen(url, timeout=40) as r:
-                    data = json.loads(r.read().decode("utf-8"))
-                transcript = data.get("transcript", "") or transcript
+    base = base_url.rstrip("/")
+    deadline = time.time() + overall_timeout
 
-                # If server says idle=True, we consider it "done enough"
-                if data.get("idle") is True:
-                    break
+    inbound_seen = False
 
-                # If timeout=True, keep looping until overall timeout
-            except (HTTPError, URLError, TimeoutError):
-                # transient network issues: wait and retry
-                time.sleep(1.0)
+    def fetch():
+        url = f"{base}/result/{call_sid}"
+        with urlopen(url, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8"))
 
-        return transcript
+    last_transcript = ""
+
+    while time.time() < deadline:
+        data = fetch()
+        tr = data.get("transcript", "") or ""
+
+        if require_inbound and "[inbound_track]" in tr:
+            inbound_seen = True
+
+        # If inbound required but not yet seen, keep waiting
+        if require_inbound and not inbound_seen:
+            time.sleep(1)
+            continue
+
+        # Wait a short idle window to ensure agent finished speaking
+        time.sleep(idle_seconds_after_inbound)
+        data2 = fetch()
+        tr2 = data2.get("transcript", "") or ""
+
+        if tr2 == tr:
+            return tr2
+
+        last_transcript = tr2
+        time.sleep(1)
+
+    # Timeout fallback
+    return fetch().get("transcript", "") or ""
+
+def extract_agent_only(full_transcript: str) -> str:
+    lines = []
+    for line in (full_transcript or "").splitlines():
+        if line.startswith("[inbound_track]"):
+            lines.append(line.replace("[inbound_track]", "").strip())
+    return "\n".join(lines).strip()
+
 
 
 if __name__ == "__main__":
@@ -160,13 +192,6 @@ if __name__ == "__main__":
 
         print("Waiting for transcript...")
 
-        text = wait_for_transcript(
-            BASE,
-            sid,
-            min_chars=20,
-            idle_seconds=8,
-            overall_timeout=300
-        )
-
-        print("\nAGENT TRANSCRIPT:\n")
-        print(text)
+        full = wait_for_transcript(BASE, sid, require_inbound=True)
+        agent = extract_agent_only(full)
+        print("AGENT ONLY:\n", agent)

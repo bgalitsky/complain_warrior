@@ -224,15 +224,6 @@ def recording_done():
     vr.hangup()
     return Response(str(vr), mimetype="text/xml")
 
-@app.get("/result/<call_sid>")
-def result(call_sid: str):
-    return jsonify({
-        "call_sid": call_sid,
-        "transcript": get_transcript(call_sid)
-    })
-
-import time
-from flask import jsonify
 
 @app.get("/result/<call_sid>")
 def result(call_sid: str):
