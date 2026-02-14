@@ -1,0 +1,14 @@
+nohup: ignoring input
+/home/ec2-user/.local/lib/python3.9/site-packages/google/auth/__init__.py:54: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/home/ec2-user/.local/lib/python3.9/site-packages/google/oauth2/__init__.py:40: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/home/ec2-user/.local/lib/python3.9/site-packages/google/api_core/_python_version_support.py:246: FutureWarning: You are using a non-supported Python version (3.9.23). Google will not post any further updates to google.api_core supporting this Python version. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+ * Serving Flask app 'gmail_oauth_server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:8510
+Press CTRL+C to quit
+89.105.204.248 - - [13/Feb/2026 19:13:21] "GET /auth/start HTTP/1.0" 302 -
+89.105.204.248 - - [13/Feb/2026 19:13:33] "GET /oauth2callback?state=Zig8bcuaVXJuJHHuzhGQeU4kEoR9A0&code=4/0ASc3gC3PGwKXdI2QSGBplj54IgrYfOmDbGZvlSUtshFr6iiUPjKM0-n-4tHo0nJi2hWrVw&scope=email%20https://www.googleapis.com/auth/gmail.readonly%20https://www.googleapis.com/auth/gmail.send%20https://www.googleapis.com/auth/gmail.modify%20https://www.googleapis.com/auth/userinfo.email%20openid&authuser=0&prompt=consent HTTP/1.0" 200 -

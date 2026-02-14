@@ -1,0 +1,113 @@
+{
+  "CMP-20260209-120745": {
+    "complaint_id": "CMP-20260209-120745",
+    "subject": "Reservation Q7K2LM – Request reimbursement forlost connection",
+    "complaint_raw": "I was flying on air chaina to Barcelona and then on to London on BA but AC was late so that I missed my conection",
+    "complaint_professional": "Dear Customer Relations Team,\n\nI am writing to request assistance following a missed connection caused by a delay on my inbound flight.\n\nKey facts:\n- Itinerary: Air China flight to Barcelona connecting to a British Airways flight to London\n- The Air China flight arrived late\n- As a result, I missed my British Airways connection to London\n\nRequested remedy:\n- Please provide alternative travel to London at the earliest opportunity\n- Please confirm any compensation or assistance available due to the missed connection\n\nThank you for your prompt help. I can provide my booking reference and any additional details you require.\n\nSincerely,\n[Your Name]",
+    "created_at": "2026-02-09T12:08:15",
+    "docs": [],
+    "evidence_pack_pdf": null,
+    "threads": {
+      "19c41a89fb6328a5": {
+        "thread_id": "19c41a89fb6328a5",
+        "label": "merchant_support",
+        "status": "open",
+        "parent_thread_id": null,
+        "last_handled_msg_id": null,
+        "last_inbound": {
+          "message_id": "19c58979c633d745",
+          "from": "Boris Galitsky <bgalitsky@hotmail.com>",
+          "subject": "Re: [CMP-20260209-120745] [AGENT=merchant_support] Reservation Q7K2LM – Request reimbursement forlost connection",
+          "date": "Fri, 13 Feb 2026 20:00:53 +0000",
+          "labels": [
+            "IMPORTANT",
+            "CATEGORY_PERSONAL"
+          ],
+          "body": "Sorry, no assistance\r\n________________________________\r\nFrom: bg7550@gmail.com <bg7550@gmail.com>\r\nSent: Friday, February 13, 2026 2:59 PM\r\nTo: bgalitsky@hotmail.com <bgalitsky@hotmail.com>\r\nSubject: [CMP-20260209-120745] [AGENT=merchant_support] Reservation Q7K2LM – Request reimbursement forlost connection\r\n\r\nDear Customer Relations Team,\r\n\r\nI am writing to request assistance following a missed connection\r\ncaused by a delay on my inbound flight.\r\n\r\nKey facts:\r\n- Itinerary: Air China flight to Barcelona connecting to a British\r\nAirways flight to London\r\n- The Air China flight arrived late\r\n- As a result, I missed my British Airways connection to London\r\n\r\nRequested remedy:\r\n- Please provide alternative travel to London at the earliest opportunity\r\n- Please confirm any compensation or assistance available due to the\r\nmissed connection\r\n\r\nThank you for your prompt help. I can provide my booking reference and\r\nany additional details you require.\r\n\r\nSincerely,\r\n[Your Name]"
+        },
+        "timeline": [
+          {
+            "ts": "2026-02-09T12:08:16",
+            "kind": "draft_ready",
+            "detail": "Initial opening letter created from professional complaint"
+          },
+          {
+            "ts": "2026-02-09T12:11:35",
+            "kind": "sent",
+            "detail": "Sent draft[0] to bgalitsky@hotmail.com agent=merchant_support"
+          },
+          {
+            "ts": "2026-02-09T12:48:03",
+            "kind": "phone_reply",
+            "detail": "Captured customer-support reply via phone call"
+          },
+          {
+            "ts": "2026-02-13T19:59:30",
+            "kind": "sent",
+            "detail": "Sent draft[0] to bgalitsky@hotmail.com agent=merchant_support"
+          },
+          {
+            "ts": "2026-02-13T20:01:09",
+            "kind": "inbound_view",
+            "detail": "Viewed inbound msg=19c58979c633d745 subj=Re: [CMP-20260209-120745] [AGENT=merchant_support] Reservation Q7K2LM – Request reimbursement forlost connection"
+          },
+          {
+            "ts": "2026-02-14T07:38:32",
+            "kind": "inbound_view",
+            "detail": "Viewed inbound msg=19c58979c633d745 subj=Re: [CMP-20260209-120745] [AGENT=merchant_support] Reservation Q7K2LM – Request reimbursement forlost connection"
+          },
+          {
+            "ts": "2026-02-14T09:00:43",
+            "kind": "sent",
+            "detail": "Sent draft[0] to bgalitsky@hotmail.com agent=merchant_support"
+          },
+          {
+            "ts": "2026-02-14T09:04:48",
+            "kind": "phone_reply",
+            "detail": "Captured customer-support reply via phone call"
+          },
+          {
+            "ts": "2026-02-14T09:06:11",
+            "kind": "phone_reply",
+            "detail": "Captured customer-support reply via phone call"
+          },
+          {
+            "ts": "2026-02-14T09:34:20",
+            "kind": "phone_reply",
+            "detail": "Captured customer-support reply via phone call"
+          },
+          {
+            "ts": "2026-02-14T09:36:15",
+            "kind": "phone_reply",
+            "detail": "Captured customer-support reply via phone call"
+          }
+        ],
+        "last_outbound_sent_at": "2026-02-14T09:00:43",
+        "last_phone_reply": {
+          "ts": "2026-02-14T09:36:15",
+          "vendor_hint": "",
+          "text": "Yes, I understand your complaint, I will help you, but you need to send additional documents. Please."
+        },
+        "last_decision": null,
+        "last_draft": {
+          "kind": "email",
+          "to_hint": "merchant_support",
+          "subject": "Reservation Q7K2LM – Request reimbursement forlost connection",
+          "body": "Dear Customer Relations Team,\n\nI am writing to request assistance following a missed connection caused by a delay on my inbound flight.\n\nKey facts:\n- Itinerary: Air China flight to Barcelona connecting to a British Airways flight to London\n- The Air China flight arrived late\n- As a result, I missed my British Airways connection to London\n\nRequested remedy:\n- Please provide alternative travel to London at the earliest opportunity\n- Please confirm any compensation or assistance available due to the missed connection\n\nThank you for your prompt help. I can provide my booking reference and any additional details you require.\n\nSincerely,\n[Your Name]"
+        },
+        "drafts": [
+          {
+            "kind": "email",
+            "to_hint": "merchant_support",
+            "subject": "Reservation Q7K2LM – Request reimbursement forlost connection",
+            "body": "Dear Customer Relations Team,\n\nI am writing to request assistance following a missed connection caused by a delay on my inbound flight.\n\nKey facts:\n- Itinerary: Air China flight to Barcelona connecting to a British Airways flight to London\n- The Air China flight arrived late\n- As a result, I missed my British Airways connection to London\n\nRequested remedy:\n- Please provide alternative travel to London at the earliest opportunity\n- Please confirm any compensation or assistance available due to the missed connection\n\nThank you for your prompt help. I can provide my booking reference and any additional details you require.\n\nSincerely,\n[Your Name]"
+          }
+        ]
+      }
+    },
+    "safe_mode": true,
+    "user_email": "bgalitsky@hotmail.com",
+    "user_name": "Boris Galitsky",
+    "auto_send_policy": "off"
+  }
+}

@@ -1,0 +1,66 @@
+nohup: ignoring input
+
+Collecting usage statistics. To deactivate, set browser.gatherUsageStats to false.
+
+
+  You can now view your Streamlit app in your browser.
+
+  URL: http://127.0.0.1:8509
+
+/home/ec2-user/.local/lib/python3.9/site-packages/google/api_core/_python_version_support.py:246: FutureWarning: You are using a non-supported Python version (3.9.23). Google will not post any further updates to google.api_core supporting this Python version. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+/home/ec2-user/.local/lib/python3.9/site-packages/google/auth/__init__.py:54: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+/home/ec2-user/.local/lib/python3.9/site-packages/google/oauth2/__init__.py:40: FutureWarning: You are using a Python version 3.9 past its end of life. Google will update google-auth with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade your Python version, and then update google-auth.
+  warnings.warn(eol_message.format("3.9"), FutureWarning)
+2026-02-13 18:22:14.818 Uncaught app execution
+Traceback (most recent call last):
+  File "/home/ec2-user/.local/lib/python3.9/site-packages/streamlit/runtime/scriptrunner/exec_code.py", line 128, in exec_func_with_error_handling
+    result = func()
+  File "/home/ec2-user/.local/lib/python3.9/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 669, in code_to_exec
+    exec(code, module.__dict__)  # noqa: S102
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 452, in <module>
+    main()
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 111, in main
+    _ensure_manager()
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 27, in _ensure_manager
+    st.session_state.manager = ComplaintWarriorManager(
+  File "/home/ec2-user/phone_call/complaint_manager_phone.py", line 431, in __init__
+    self.service = build_gmail_service()
+  File "/home/ec2-user/phone_call/complaint_manager_phone.py", line 187, in build_gmail_service
+    raise RuntimeError(
+RuntimeError: Gmail is not connected. No token found in SQLite. Open the Streamlit UI and click 'Connect Gmail' first.
+2026-02-13 18:24:28.624 Uncaught app execution
+Traceback (most recent call last):
+  File "/home/ec2-user/.local/lib/python3.9/site-packages/streamlit/runtime/scriptrunner/exec_code.py", line 128, in exec_func_with_error_handling
+    result = func()
+  File "/home/ec2-user/.local/lib/python3.9/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 669, in code_to_exec
+    exec(code, module.__dict__)  # noqa: S102
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 452, in <module>
+    main()
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 111, in main
+    _ensure_manager()
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 27, in _ensure_manager
+    st.session_state.manager = ComplaintWarriorManager(
+  File "/home/ec2-user/phone_call/complaint_manager_phone.py", line 431, in __init__
+    self.service = build_gmail_service()
+  File "/home/ec2-user/phone_call/complaint_manager_phone.py", line 187, in build_gmail_service
+    raise RuntimeError(
+RuntimeError: Gmail is not connected. No token found in SQLite. Open the Streamlit UI and click 'Connect Gmail' first.
+2026-02-13 18:26:57.273 Uncaught app execution
+Traceback (most recent call last):
+  File "/home/ec2-user/.local/lib/python3.9/site-packages/streamlit/runtime/scriptrunner/exec_code.py", line 128, in exec_func_with_error_handling
+    result = func()
+  File "/home/ec2-user/.local/lib/python3.9/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 669, in code_to_exec
+    exec(code, module.__dict__)  # noqa: S102
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 452, in <module>
+    main()
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 111, in main
+    _ensure_manager()
+  File "/home/ec2-user/phone_call/cw_app_phone.py", line 27, in _ensure_manager
+    st.session_state.manager = ComplaintWarriorManager(
+  File "/home/ec2-user/phone_call/complaint_manager_phone.py", line 431, in __init__
+    self.service = build_gmail_service()
+  File "/home/ec2-user/phone_call/complaint_manager_phone.py", line 187, in build_gmail_service
+    raise RuntimeError(
+RuntimeError: Gmail is not connected. No token found in SQLite. Open the Streamlit UI and click 'Connect Gmail' first.
