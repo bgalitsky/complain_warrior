@@ -11,8 +11,9 @@ import streamlit as st
 from text_processor import TextProcessing
 from complaint_manager_phone import ComplaintWarriorManager, AUTO_SEND_POLICIES, TEST_INBOX_EMAIL
 
-APP_TITLE = "Complaint Warrior — Streamlit"
+APP_TITLE = "Complaint Warrior"
 UPLOAD_DIR = Path("cw_uploads")  # local folder for uploaded evidence
+from gmail_token_store import GmailTokenStore
 
 
 def _ensure_manager():
@@ -20,6 +21,10 @@ def _ensure_manager():
     Create a singleton manager per Streamlit session.
     Streamlit reruns the script often; we store manager in session_state.
     """
+
+    if "user_email" not in st.session_state:
+        st.session_state.user_email = None
+
     if "tp" not in st.session_state:
         st.session_state.tp = TextProcessing()
 
@@ -159,6 +164,25 @@ def main():
         f"Test harness: all outgoing mail is sent to **{TEST_INBOX_EMAIL}** "
         f"(intended real recipient kept in subject)."
     )
+
+    st.subheader("Gmail connection")
+
+    token_db = os.environ.get("GMAIL_TOKEN_DB", "cw_gmail_tokens.sqlite")
+    store = GmailTokenStore(db_path=token_db)
+    keys = store.list_keys()
+
+    public_base = os.environ.get("PUBLIC_BASE", "").rstrip("/")
+    if public_base:
+        st.markdown(f"[Connect Gmail]({public_base}/auth/start)")
+    else:
+        st.warning("PUBLIC_BASE is not set; cannot show Connect Gmail link.")
+
+    if keys:
+        chosen = st.selectbox("Use this connected Gmail account", keys, index=0)
+        st.session_state.user_email = chosen
+        st.success(f"Using Gmail: {chosen}")
+    else:
+        st.info("No Gmail accounts connected yet. Click 'Connect Gmail' above.")
 
     # Top controls
     colA, colB, colC, colD = st.columns([1.2, 1.2, 1.2, 1.4])

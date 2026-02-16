@@ -17,6 +17,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 import mimetypes
+from storage import ComplaintStore, CallResultStore
+
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -423,13 +425,24 @@ class ComplaintWarriorManager:
         state_file: str = STATE_FILE,
         poll_seconds: int = DEFAULT_POLL_SECONDS,
         log_cb: Optional[Callable[[str], None]] = None,
+        *,
+        gmail_user_key: Optional[str] = "default",
+        token_db_path: str = "cw_gmail_tokens.sqlite",
     ):
         self.tp = text_processor
         self.state_file = state_file
         self.poll_seconds = poll_seconds
         self.log_cb = log_cb or (lambda s: None)
 
-        self.service = build_gmail_service()
+        self.gmail_user_key = gmail_user_key
+        self.token_db_path = token_db_path
+
+        if not self.gmail_user_key:
+            raise RuntimeError(
+                "Gmail user is not selected. Connect Gmail in the UI and select an account first."
+            )
+
+        self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
         self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
 
         self._lock = threading.RLock()
@@ -437,6 +450,26 @@ class ComplaintWarriorManager:
         self._thread: Optional[threading.Thread] = None
 
         self.complaints: Dict[str, ComplaintState] = self._load_state()
+
+        self.user_email = None
+        self.store = ComplaintStore()  # uses CW_DB_PATH or cw_multiuser.sqlite
+        self.call_store = CallResultStore()
+
+    # ---------- Gmail account switching (multi-user) ----------
+    def set_gmail_user(self, gmail_user_key: str):
+        """Switch the Gmail identity used by this manager (multi-user support)."""
+        if not gmail_user_key:
+            raise ValueError("gmail_user_key is required")
+        with self._lock:
+            self.gmail_user_key = gmail_user_key
+            self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
+            self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
+            self.log_cb(f"[gmail] Switched active Gmail user to: {gmail_user_key}")
+
+    def set_user(self, user_email: str):
+        self.user_email = (user_email or "").strip().lower()
+        if not self.user_email:
+            raise ValueError("user_email is required")
 
     # ---------- persistence ----------
     def _load_state(self) -> Dict[str, ComplaintState]:
