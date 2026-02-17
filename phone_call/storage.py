@@ -1,96 +1,64 @@
-# storage.py
+"""storage.py
+
+SQLite persistence for Complaint Warrior.
+
+Design goals:
+- Multi-user: every row is scoped by user_email.
+- Simple: store the full ComplaintState JSON blob; the manager owns the schema.
+- Safe defaults: create tables automatically.
+
+This file intentionally has *no* external dependencies.
+"""
+
+from __future__ import annotations
+
 import json
-import os
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-DEFAULT_DB = os.environ.get("CW_DB_PATH", "cw_multiuser.sqlite")
-
-def _connect(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    return con
-
-def init_db(db_path: str = DEFAULT_DB) -> None:
-    con = _connect(db_path)
-    cur = con.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS complaints (
-        user_email TEXT NOT NULL,
-        complaint_id TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        complaint_json TEXT NOT NULL,
-        PRIMARY KEY (user_email, complaint_id)
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS call_results (
-        user_email TEXT NOT NULL,
-        call_sid TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER,
-        transcript TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (user_email, call_sid)
-    );
-    """)
-
-    con.commit()
-    con.close()
 
 class ComplaintStore:
-    def __init__(self, db_path: str = DEFAULT_DB):
-        self.db_path = db_path
-        init_db(db_path)
+    """Stores ComplaintState JSON blobs keyed by (user_email, complaint_id)."""
 
-    def upsert_complaint(self, user_email: str, complaint_id: str, complaint: Dict[str, Any]) -> None:
-        now = int(time.time())
-        payload = json.dumps(complaint, ensure_ascii=False)
-        con = _connect(self.db_path)
+    def __init__(self, db_path: str = "cw_store.sqlite"):
+        self.db_path = db_path
+        self._init()
+
+    def _connect(self) -> sqlite3.Connection:
+        # check_same_thread=False allows use from background threads
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _init(self) -> None:
+        con = self._connect()
         con.execute(
             """
-            INSERT INTO complaints(user_email, complaint_id, created_at, updated_at, complaint_json)
-            VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(user_email, complaint_id)
-            DO UPDATE SET updated_at=excluded.updated_at, complaint_json=excluded.complaint_json
-            """,
-            (user_email, complaint_id, now, now, payload),
+            CREATE TABLE IF NOT EXISTS complaints (
+              user_email     TEXT NOT NULL,
+              complaint_id   TEXT NOT NULL,
+              complaint_json TEXT NOT NULL,
+              updated_at     REAL NOT NULL,
+              PRIMARY KEY (user_email, complaint_id)
+            )
+            """
         )
         con.commit()
         con.close()
 
-    def get_complaint(self, user_email: str, complaint_id: str) -> Optional[Dict[str, Any]]:
-        con = _connect(self.db_path)
-        row = con.execute(
-            "SELECT complaint_json FROM complaints WHERE user_email=? AND complaint_id=?",
-            (user_email, complaint_id),
-        ).fetchone()
-        con.close()
-        if not row:
-            return None
-        return json.loads(row[0])
-
-    def list_complaints(self, user_email: str, limit: int = 200) -> List[Tuple[str, int, int]]:
-        con = _connect(self.db_path)
-        rows = con.execute(
+    def upsert(self, user_email: str, complaint_id: str, complaint_json: Dict[str, Any]) -> None:
+        con = self._connect()
+        con.execute(
             """
-            SELECT complaint_id, created_at, updated_at
-            FROM complaints
-            WHERE user_email=?
-            ORDER BY updated_at DESC
-            LIMIT ?
+            INSERT OR REPLACE INTO complaints(user_email, complaint_id, complaint_json, updated_at)
+            VALUES(?,?,?,?)
             """,
-            (user_email, limit),
-        ).fetchall()
+            (user_email, complaint_id, json.dumps(complaint_json, ensure_ascii=False), time.time()),
+        )
+        con.commit()
         con.close()
-        return rows
 
-    def delete_complaint(self, user_email: str, complaint_id: str) -> None:
-        con = _connect(self.db_path)
+    def delete(self, user_email: str, complaint_id: str) -> None:
+        con = self._connect()
         con.execute(
             "DELETE FROM complaints WHERE user_email=? AND complaint_id=?",
             (user_email, complaint_id),
@@ -98,37 +66,75 @@ class ComplaintStore:
         con.commit()
         con.close()
 
-class CallResultStore:
-    def __init__(self, db_path: str = DEFAULT_DB):
-        self.db_path = db_path
-        init_db(db_path)
+    def get(self, user_email: str, complaint_id: str) -> Optional[Dict[str, Any]]:
+        con = self._connect()
+        row = con.execute(
+            "SELECT complaint_json FROM complaints WHERE user_email=? AND complaint_id=?",
+            (user_email, complaint_id),
+        ).fetchone()
+        con.close()
+        return json.loads(row[0]) if row else None
 
-    def upsert_transcript(self, user_email: str, call_sid: str, transcript: str) -> None:
-        now = int(time.time())
-        con = _connect(self.db_path)
+    def load_all(self, user_email: str) -> Dict[str, Dict[str, Any]]:
+        con = self._connect()
+        rows = con.execute(
+            "SELECT complaint_id, complaint_json FROM complaints WHERE user_email=?",
+            (user_email,),
+        ).fetchall()
+        con.close()
+        out: Dict[str, Dict[str, Any]] = {}
+        for cid, js in rows:
+            out[cid] = json.loads(js)
+        return out
+
+    def list_ids(self, user_email: str) -> List[str]:
+        con = self._connect()
+        rows = con.execute(
+            "SELECT complaint_id FROM complaints WHERE user_email=? ORDER BY updated_at DESC",
+            (user_email,),
+        ).fetchall()
+        con.close()
+        return [r[0] for r in rows]
+
+
+class CallResultStore:
+    """Stores Twilio call results keyed by call_sid."""
+
+    def __init__(self, db_path: str = "cw_store.sqlite"):
+        self.db_path = db_path
+        self._init()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _init(self) -> None:
+        con = self._connect()
         con.execute(
             """
-            INSERT INTO call_results(user_email, call_sid, created_at, updated_at, transcript)
-            VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(user_email, call_sid)
-            DO UPDATE SET updated_at=excluded.updated_at, transcript=excluded.transcript
-            """,
-            (user_email, call_sid, now, now, transcript),
+            CREATE TABLE IF NOT EXISTS call_results (
+              call_sid     TEXT PRIMARY KEY,
+              result_json  TEXT NOT NULL,
+              updated_at   REAL NOT NULL
+            )
+            """
         )
         con.commit()
         con.close()
 
-    def get_transcript(self, user_email: str, call_sid: str) -> Optional[Dict[str, Any]]:
-        con = _connect(self.db_path)
+    def set(self, call_sid: str, result_json: Dict[str, Any]) -> None:
+        con = self._connect()
+        con.execute(
+            "INSERT OR REPLACE INTO call_results(call_sid, result_json, updated_at) VALUES(?,?,?)",
+            (call_sid, json.dumps(result_json, ensure_ascii=False), time.time()),
+        )
+        con.commit()
+        con.close()
+
+    def get(self, call_sid: str) -> Optional[Dict[str, Any]]:
+        con = self._connect()
         row = con.execute(
-            """
-            SELECT call_sid, transcript, updated_at
-            FROM call_results
-            WHERE user_email=? AND call_sid=?
-            """,
-            (user_email, call_sid),
+            "SELECT result_json FROM call_results WHERE call_sid=?",
+            (call_sid,),
         ).fetchone()
         con.close()
-        if not row:
-            return None
-        return {"call_sid": row[0], "transcript": row[1], "updated": row[2]}
+        return json.loads(row[0]) if row else None

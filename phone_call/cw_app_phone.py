@@ -11,9 +11,8 @@ import streamlit as st
 from text_processor import TextProcessing
 from complaint_manager_phone import ComplaintWarriorManager, AUTO_SEND_POLICIES, TEST_INBOX_EMAIL
 
-APP_TITLE = "Complaint Warrior"
+APP_TITLE = "Complaint Warrior — Streamlit"
 UPLOAD_DIR = Path("cw_uploads")  # local folder for uploaded evidence
-from gmail_token_store import GmailTokenStore
 
 
 def _ensure_manager():
@@ -21,10 +20,6 @@ def _ensure_manager():
     Create a singleton manager per Streamlit session.
     Streamlit reruns the script often; we store manager in session_state.
     """
-
-    if "user_email" not in st.session_state:
-        st.session_state.user_email = None
-
     if "tp" not in st.session_state:
         st.session_state.tp = TextProcessing()
 
@@ -90,74 +85,18 @@ def _manual_poll_once():
     # Manager has internal _poll_once; we use it as an "on-demand check inbox" button.
     st.session_state.manager._poll_once()
 
-import sqlite3, json
-
-TOKEN_DB = "cw_gmail_tokens.sqlite"
-
-def _gmail_connected() -> bool:
-    try:
-        con = sqlite3.connect(TOKEN_DB)
-        con.execute("""
-          CREATE TABLE IF NOT EXISTS gmail_tokens(
-            key TEXT PRIMARY KEY,
-            token_json TEXT NOT NULL,
-            updated_at REAL NOT NULL
-          )
-        """)
-        row = con.execute("SELECT token_json FROM gmail_tokens WHERE key='default'").fetchone()
-        con.close()
-        return bool(row and row[0])
-    except Exception:
-        return False
-
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    _ensure_manager()
-
-    # Add near imports
-    import sqlite3, json
-
-    TOKEN_DB = "cw_gmail_tokens.sqlite"
-
-    def _gmail_connected() -> bool:
-        try:
-            con = sqlite3.connect(TOKEN_DB)
-            con.execute("""
-              CREATE TABLE IF NOT EXISTS gmail_tokens(
-                key TEXT PRIMARY KEY,
-                token_json TEXT NOT NULL,
-                updated_at REAL NOT NULL
-              )
-            """)
-            row = con.execute("SELECT token_json FROM gmail_tokens WHERE key='default'").fetchone()
-            con.close()
-            return bool(row and row[0])
-        except Exception:
-            return False
-
-    # Inside main(), after _ensure_manager():
-    PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "").rstrip("/")
-
-    st.sidebar.divider()
-    st.sidebar.subheader("Gmail (OAuth)")
-
-    if not PUBLIC_BASE:
-        st.sidebar.error("PUBLIC_BASE is not set. Export PUBLIC_BASE=https://YOURDEV.ngrok-free.app")
+    st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+    public_base = os.environ.get("PUBLIC_BASE", "").rstrip("/")
+    st.markdown("## Gmail")
+    if public_base:
+        st.markdown(f"[Connect Gmail]({public_base}/auth/start)")
     else:
-        connected = _gmail_connected()
-        if connected:
-            st.sidebar.success("Gmail connected ✅")
-        else:
-            st.sidebar.warning("Gmail not connected")
+        st.error("PUBLIC_BASE is not set, cannot show Connect Gmail link.")
 
-        st.sidebar.markdown(
-            f"[Connect Gmail]({PUBLIC_BASE}/auth/start)",
-            help="Opens Google consent screen. After approval, comes back and stores a refresh token in SQLite."
-        )
-
-        if st.sidebar.button("Re-check Gmail connection"):
-            st.rerun()
+    _ensure_manager()
 
     st.title(APP_TITLE)
     st.caption(
@@ -165,24 +104,36 @@ def main():
         f"(intended real recipient kept in subject)."
     )
 
-    st.subheader("Gmail connection")
+    # --- Multi-user login (scopes complaints + selects Gmail token key) ---
+    login_col1, login_col2 = st.columns([2, 1])
+    with login_col1:
+        login_email = st.text_input(
+            "Your email (used as user id + Gmail token key)",
+            value=st.session_state.get("active_user_email", ""),
+            placeholder="you@gmail.com",
+        ).strip().lower()
+    with login_col2:
+        apply_login = st.button("Use this account", type="primary")
 
-    token_db = os.environ.get("GMAIL_TOKEN_DB", "cw_gmail_tokens.sqlite")
-    store = GmailTokenStore(db_path=token_db)
-    keys = store.list_keys()
+    if apply_login and login_email:
+        st.session_state.active_user_email = login_email
+        try:
+            st.session_state.manager.set_user(login_email)
+        except Exception as e:
+            st.error(f"Failed to set active user: {e}")
+        # Gmail token key == email (multi-user)
+        try:
+            st.session_state.manager.set_gmail_user(login_email)
+            st.success("Active user + Gmail key updated.")
+        except Exception as e:
+            st.warning(
+                "Gmail is not connected for this user yet. "
+                "Click 'Connect Gmail' (OAuth) and try again.\n\n"
+                f"Details: {e}"
+            )
 
-    public_base = os.environ.get("PUBLIC_BASE", "").rstrip("/")
-    if public_base:
-        st.markdown(f"[Connect Gmail]({public_base}/auth/start)")
-    else:
-        st.warning("PUBLIC_BASE is not set; cannot show Connect Gmail link.")
-
-    if keys:
-        chosen = st.selectbox("Use this connected Gmail account", keys, index=0)
-        st.session_state.user_email = chosen
-        st.success(f"Using Gmail: {chosen}")
-    else:
-        st.info("No Gmail accounts connected yet. Click 'Connect Gmail' above.")
+    if not st.session_state.get("active_user_email"):
+        st.info("Enter your email and click **Use this account** to load your complaints.")
 
     # Top controls
     colA, colB, colC, colD = st.columns([1.2, 1.2, 1.2, 1.4])
@@ -214,7 +165,10 @@ def main():
     with left:
         st.subheader("New complaint")
 
-        your_email = st.text_input("Your email (for testing)", value="bgalitsky@hotmail.com")
+        your_email = st.text_input(
+            "Your email (for complaint record)",
+            value=st.session_state.get("active_user_email", "bgalitsky@hotmail.com"),
+        )
         your_name = st.text_input("Your name", value="Boris Galitsky")
         subject = st.text_input("Subject", value="Reservation Q7K2LM – Request reimbursement for delay ($180 hotel fee) and goodwill credit")
         raw = st.text_area(

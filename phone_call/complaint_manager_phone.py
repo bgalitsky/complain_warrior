@@ -17,8 +17,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 import mimetypes
-from storage import ComplaintStore, CallResultStore
-
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -28,6 +26,7 @@ from google.auth.transport.requests import Request
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas as rl_canvas
 
+from storage import ComplaintStore, CallResultStore
 from text_processor import TextProcessing, AgentDecision
 
 from call import ComplaintCallAgent
@@ -42,7 +41,7 @@ SCOPES = [
 
 TOKEN_JSON = "token.json"
 CREDENTIALS_JSON = "credentials.json"
-STATE_FILE = "complaint_state.json"
+STATE_FILE = "complaint_state.json"  # legacy (single-user JSON). Multi-user uses SQLite.
 LABEL_PROCESSED = "CW_PROCESSED"
 
 DEFAULT_POLL_SECONDS = 45
@@ -426,24 +425,38 @@ class ComplaintWarriorManager:
         poll_seconds: int = DEFAULT_POLL_SECONDS,
         log_cb: Optional[Callable[[str], None]] = None,
         *,
-        gmail_user_key: Optional[str] = "default",
+        user_email: Optional[str] = None,
+        gmail_user_key: Optional[str] = None,
         token_db_path: str = "cw_gmail_tokens.sqlite",
+        store_db_path: str = "cw_store.sqlite",
     ):
         self.tp = text_processor
         self.state_file = state_file
         self.poll_seconds = poll_seconds
         self.log_cb = log_cb or (lambda s: None)
 
-        self.gmail_user_key = gmail_user_key
+        # Multi-user persistence (complaints + call results)
+        self.store_db_path = store_db_path
+        self.store = ComplaintStore(db_path=self.store_db_path)
+        self.call_store = CallResultStore(db_path=self.store_db_path)
+
+        # Active app user (complaints are scoped by this email)
+        self.active_user_email: Optional[str] = None
+        if user_email:
+            self.set_user(user_email)
+
+        # Gmail identity (token key). Default to user_email.
+        self.gmail_user_key = gmail_user_key or self.active_user_email or "default"
         self.token_db_path = token_db_path
 
-        if not self.gmail_user_key:
-            raise RuntimeError(
-                "Gmail user is not selected. Connect Gmail in the UI and select an account first."
-            )
-
-        self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
-        self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
+        # Gmail may not be connected yet (first-time user). Allow headless init.
+        self.service = None
+        self.processed_label_id = None
+        try:
+            self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
+            self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
+        except Exception as e:
+            self.log_cb(f"[gmail] Not connected yet for key={self.gmail_user_key}: {e}")
 
         self._lock = threading.RLock()
         self._running = False
@@ -451,39 +464,66 @@ class ComplaintWarriorManager:
 
         self.complaints: Dict[str, ComplaintState] = self._load_state()
 
-        self.user_email = None
-        self.store = ComplaintStore()  # uses CW_DB_PATH or cw_multiuser.sqlite
-        self.call_store = CallResultStore()
+    # ---------- user / gmail switching (multi-user) ----------
+    def set_user(self, user_email: str):
+        """Select the active app user (complaints are scoped by this email)."""
+        if not user_email:
+            raise ValueError("user_email is required")
+        with self._lock:
+            self.active_user_email = user_email.strip().lower()
+            # If caller didn't explicitly pick a gmail_user_key, keep them aligned.
+            if getattr(self, "gmail_user_key", None) in (None, "default"):
+                self.gmail_user_key = self.active_user_email
+            self.complaints = self._load_state()
+            self.log_cb(f"[user] Active user: {self.active_user_email}")
 
-    # ---------- Gmail account switching (multi-user) ----------
     def set_gmail_user(self, gmail_user_key: str):
-        """Switch the Gmail identity used by this manager (multi-user support)."""
+        """Switch Gmail token identity (key in cw_gmail_tokens.sqlite)."""
         if not gmail_user_key:
             raise ValueError("gmail_user_key is required")
         with self._lock:
             self.gmail_user_key = gmail_user_key
             self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
             self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
-            self.log_cb(f"[gmail] Switched active Gmail user to: {gmail_user_key}")
+            self.log_cb(f"[gmail] Active Gmail key: {self.gmail_user_key}")
 
-    def set_user(self, user_email: str):
-        self.user_email = (user_email or "").strip().lower()
-        if not self.user_email:
-            raise ValueError("user_email is required")
+    def _gmail(self):
+        """Return connected Gmail service or raise a clear error."""
+        if not self.service or not self.processed_label_id:
+            raise RuntimeError(
+                "Gmail is not connected for this user. "
+                "Use the UI 'Connect Gmail' flow and then select the same email as the active user."
+            )
+        return self.service
 
     # ---------- persistence ----------
     def _load_state(self) -> Dict[str, ComplaintState]:
+        # Multi-user: load from SQLite when active_user_email is set.
+        if self.active_user_email:
+            raw_map = self.store.load_all(self.active_user_email)
+            out: Dict[str, ComplaintState] = {}
+            for cid, d in raw_map.items():
+                out[cid] = ComplaintState.from_json(d)
+            return out
+
+        # Fallback legacy single-user JSON file.
         if not os.path.exists(self.state_file):
             return {}
         with open(self.state_file, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        out = {}
+        out: Dict[str, ComplaintState] = {}
         for cid, d in raw.items():
             out[cid] = ComplaintState.from_json(d)
         return out
 
     def _save_state(self):
         with self._lock:
+            if self.active_user_email:
+                for cid, cs in self.complaints.items():
+                    self.store.upsert(self.active_user_email, cid, cs.to_json())
+                return
+
+            # Legacy fallback
             raw = {cid: cs.to_json() for cid, cs in self.complaints.items()}
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(raw, f, ensure_ascii=False, indent=2)
@@ -600,7 +640,7 @@ Subject suggestion: {draft_email.get('subject','')}
             attachments.append(cs.evidence_pack_pdf)
 
         sent = send_email_with_attachments(
-            service=self.service,
+            service=self._gmail(),
             to_email=TEST_INBOX_EMAIL,
             subject=subj,
             body_text=body,
@@ -673,7 +713,7 @@ Subject suggestion: {draft_email.get('subject','')}
         attachments += [p for p in cs.docs if os.path.exists(p)]
 
         send_email_with_attachments(
-            service=self.service,
+            service=self._gmail(),
             to_email=TEST_INBOX_EMAIL,
             subject=subject,
             body_text=body,
@@ -822,7 +862,7 @@ Subject suggestion: {draft_email.get('subject','')}
                     self._handle_inbound(cs.complaint_id, thread_id, msg)
 
     def _newest_unprocessed_inbound(self, thread_id: str, last_handled_msg_id: Optional[str]) -> Optional[dict]:
-        th = get_thread(self.service, thread_id)
+        th = get_thread(self._gmail(), thread_id)
         messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
         for m in reversed(messages):
             labels = m.get("labelIds") or []
@@ -841,7 +881,7 @@ Subject suggestion: {draft_email.get('subject','')}
         Returns newest inbound message in a thread, even if it was already marked processed.
         We still skip Gmail 'SENT' items (outbound from you).
         """
-        th = get_thread(self.service, thread_id)
+        th = get_thread(self._gmail(), thread_id)
         messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
         for m in reversed(messages):
             labels = m.get("labelIds") or []
@@ -906,7 +946,7 @@ Subject suggestion: {draft_email.get('subject','')}
             return cs.threads[thread_id].last_decision
 
     def _thread_transcript(self, thread_id: str) -> str:
-            th = get_thread(self.service, thread_id)
+            th = get_thread(self._gmail(), thread_id)
             messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
             out = []
             for m in messages:
@@ -968,7 +1008,7 @@ Subject suggestion: {draft_email.get('subject','')}
                 self._save_state()
 
             # Mark inbound as processed to avoid loops
-            add_label(self.service, msg["id"], self.processed_label_id)
+            add_label(self._gmail(), msg["id"], self.processed_label_id)
 
             # Possibly auto-send on this thread
             self._maybe_auto_send_thread(complaint_id, thread_id, reason="inbound_decision")
