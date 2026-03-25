@@ -15,11 +15,18 @@ APP_TITLE = "Complaint Warrior — Streamlit"
 UPLOAD_DIR = Path("cw_uploads")  # local folder for uploaded evidence
 
 
+def _log(msg: str):
+    if "logs" not in st.session_state:
+        st.session_state.logs = []
+    st.session_state.logs.append(msg)
+    st.session_state.logs = st.session_state.logs[-500:]
+
+
 def _ensure_manager():
-    """
-    Create a singleton manager per Streamlit session.
-    Streamlit reruns the script often; we store manager in session_state.
-    """
+    # logs must exist BEFORE manager init, because manager may log during __init__
+    if "logs" not in st.session_state:
+        st.session_state.logs = []
+
     if "tp" not in st.session_state:
         st.session_state.tp = TextProcessing()
 
@@ -29,8 +36,8 @@ def _ensure_manager():
             log_cb=_log,
         )
 
-    if "polling" not in st.session_state:
-        st.session_state.polling = False
+    if "active_user_email" not in st.session_state:
+        st.session_state.active_user_email = ""
 
     if "selected_complaint_id" not in st.session_state:
         st.session_state.selected_complaint_id = None
@@ -38,24 +45,14 @@ def _ensure_manager():
     if "selected_thread_id" not in st.session_state:
         st.session_state.selected_thread_id = None
 
-    if "trusted" not in st.session_state:
-        st.session_state.trusted = False
-
     if "mode" not in st.session_state:
         st.session_state.mode = "Manual"
 
+    if "trusted" not in st.session_state:
+        st.session_state.trusted = False
+
     if "poll_seconds" not in st.session_state:
         st.session_state.poll_seconds = 45
-
-    if "logs" not in st.session_state:
-        st.session_state.logs = []
-
-
-def _log(msg: str):
-    st.session_state.logs.append(msg)
-    # keep last N lines
-    st.session_state.logs = st.session_state.logs[-300:]
-
 
 def _save_uploads(files) -> List[str]:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
