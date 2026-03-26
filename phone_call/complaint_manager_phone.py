@@ -1,13 +1,12 @@
-# complaint_manager_phone.py
-# -*- coding: utf-8 -*-
-#ssh -i C:\Users\User\.ssh\aws_ec2_key.pem ec2-user@54.82.56.2
 
+# complaint_manager_phone_refactored.py
+# -*- coding: utf-8 -*-
 import os
 import re
 import json
 import time
 import base64
-import threading
+import sqlite3
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
@@ -20,18 +19,19 @@ import mimetypes
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas as rl_canvas
 
 from storage import ComplaintStore, CallResultStore
-from text_processor import TextProcessing, AgentDecision
+from gmail_token_store import GmailTokenStore
+from text_processor import TextProcessing, AgentDecision, SatisfactionDecision, ResolutionStrategy
 
-from call import ComplaintCallAgent
-
-# -------------------- Gmail / App constants --------------------
+try:
+    from call import ComplaintCallAgent
+except Exception:
+    ComplaintCallAgent = None
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
@@ -39,40 +39,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
-TOKEN_JSON = "token.json"
-CREDENTIALS_JSON = "credentials.json"
-STATE_FILE = "complaint_state.json"  # legacy (single-user JSON). Multi-user uses SQLite.
 LABEL_PROCESSED = "CW_PROCESSED"
-
-DEFAULT_POLL_SECONDS = 45
-
-# Harness behavior: ALWAYS send drafts here
 TEST_INBOX_EMAIL = "bgalitsky@hotmail.com"
+AUTO_SEND_POLICIES = ("manual", "draft_only", "auto_send")
+DEFAULT_AUTO_SEND_POLICY = "manual"
 
-AUTO_SEND_POLICIES = ("off", "spawned_only", "all")
-DEFAULT_AUTO_SEND_POLICY = "off"
-
-
-# -------------------- Utilities --------------------
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def strip_html(html: str) -> str:
-    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
-    html = re.sub(r"(?is)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?is)</p\s*>", "\n", html)
-    html = re.sub(r"(?is)<.*?>", " ", html)
-    html = re.sub(r"[ \t]+", " ", html)
-    html = re.sub(r"\n\s+\n", "\n\n", html)
-    return html.strip()
-
-
 def decode_best_effort_text(payload) -> str:
-    """
-    Robust text extraction: text/plain -> text/html -> any text/* -> recurse nested multiparts.
-    """
     if not payload:
         return ""
 
@@ -81,40 +58,21 @@ def decode_best_effort_text(payload) -> str:
 
     body = payload.get("body", {}) or {}
     if body.get("data"):
-        mt = payload.get("mimeType", "")
-        txt = decode_data(body["data"])
-        return strip_html(txt) if mt == "text/html" else txt
+        return decode_data(body["data"])
 
     parts = payload.get("parts", []) or []
-
-    def find_part(mime: str) -> Optional[str]:
+    for mime in ("text/plain", "text/html"):
         for p in parts:
             if p.get("mimeType") == mime:
                 pdata = (p.get("body") or {}).get("data")
                 if pdata:
-                    return decode_data(pdata)
-        return None
-
-    txt = find_part("text/plain")
-    if txt:
-        return txt.strip()
-
-    html = find_part("text/html")
-    if html:
-        return strip_html(html)
-
-    for p in parts:
-        if (p.get("mimeType") or "").startswith("text/"):
-            pdata = (p.get("body") or {}).get("data")
-            if pdata:
-                return strip_html(decode_data(pdata))
-
+                    txt = decode_data(pdata)
+                    return re.sub(r"<[^>]+>", " ", txt) if mime == "text/html" else txt
     for p in parts:
         if p.get("parts"):
             t = decode_best_effort_text(p)
             if t:
                 return t
-
     return ""
 
 
@@ -125,71 +83,12 @@ def get_header(headers, name: str) -> str:
     return ""
 
 
-def get_gmail_creds_local():
-    creds = None
-    if os.path.exists(TOKEN_JSON):
-        creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CREDENTIALS_JSON):
-                raise FileNotFoundError(
-                    "Missing credentials.json next to scripts (Google Cloud OAuth client)."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_JSON, SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        with open(TOKEN_JSON, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-
-    return creds
-
-
-#def build_gmail_service():
-#    creds = get_gmail_creds()
-#    return build("gmail", "v1", credentials=creds)
-
-from typing import Optional
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-
-# IMPORTANT: adjust import path if needed based on your package name
-# Your tree shows gmail_token_store.py in the same folder as complaint_manager_phone.py
-from gmail_token_store import GmailTokenStore
-
-
-def build_gmail_service(
-    token_db_path: str = "cw_gmail_tokens.sqlite",
-    token_key: str = "default",
-    user_agent: str = "ComplaintWarrior/1.0",
-):
-    """
-    Headless Gmail API client builder for EC2.
-
-    Reads OAuth token JSON from SQLite via GmailTokenStore:
-      token_json = {
-        "token": "...",
-        "refresh_token": "...",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "client_id": "...",
-        "client_secret": "...",
-        "scopes": [...]
-      }
-
-    If access token is expired, refreshes using refresh_token and writes
-    updated token back to SQLite. No token.json usage.
-    """
+def build_gmail_service(token_db_path: str = "cw_gmail_tokens.sqlite", token_key: str = "default"):
+    # Gmail auth flow preserved exactly: read token JSON from SQLite store created by gmail_oauth_server.py
     store = GmailTokenStore(db_path=token_db_path)
     token_json = store.get(token_key)
-
     if not token_json:
-        raise RuntimeError(
-            "Gmail is not connected. No token found in SQLite. "
-            "Open the Streamlit UI and click 'Connect Gmail' first."
-        )
+        raise RuntimeError("Gmail is not connected. No token found in SQLite. Open the Streamlit UI and click 'Connect Gmail' first.")
 
     creds = Credentials(
         token=token_json.get("token"),
@@ -199,26 +98,16 @@ def build_gmail_service(
         client_secret=token_json.get("client_secret"),
         scopes=token_json.get("scopes"),
     )
-
-    # Refresh if needed (headless)
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            # persist updated access token back to SQLite
             token_json["token"] = creds.token
-            # refresh_token may be None on refresh; keep existing if missing
             if getattr(creds, "refresh_token", None):
                 token_json["refresh_token"] = creds.refresh_token
             store.set(token_key, token_json)
         else:
-            raise RuntimeError(
-                "Gmail credentials are invalid and cannot be refreshed. "
-                "Re-connect Gmail via OAuth."
-            )
-
-    # cache_discovery=False avoids filesystem writes and is safer in containers
-    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-    return service
+            raise RuntimeError("Gmail credentials are invalid and cannot be refreshed. Re-connect Gmail via OAuth.")
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
 def ensure_label(service, label_name: str) -> str:
@@ -243,14 +132,7 @@ def get_thread(service, thread_id: str) -> dict:
     return service.users().threads().get(userId="me", id=thread_id, format="full").execute()
 
 
-def send_email_with_attachments(
-    service,
-    to_email: str,
-    subject: str,
-    body_text: str,
-    attachments: Optional[List[str]] = None,
-    thread_id: Optional[str] = None,
-):
+def send_email_with_attachments(service, to_email: str, subject: str, body_text: str, attachments: Optional[List[str]] = None, thread_id: Optional[str] = None):
     attachments = attachments or []
     msg = MIMEMultipart()
     msg["To"] = to_email
@@ -258,7 +140,7 @@ def send_email_with_attachments(
     msg.attach(MIMEText(body_text, "plain", "utf-8"))
 
     for path in attachments:
-        if not os.path.exists(path):
+        if not path or not os.path.exists(path):
             continue
         ctype, encoding = mimetypes.guess_type(path)
         if ctype is None or encoding is not None:
@@ -276,7 +158,6 @@ def send_email_with_attachments(
     body = {"raw": raw}
     if thread_id:
         body["threadId"] = thread_id
-
     return service.users().messages().send(userId="me", body=body).execute()
 
 
@@ -297,45 +178,31 @@ def build_evidence_pack_pdf(out_pdf_path: str, complaint_id: str, files: List[st
     line(f"Complaint ID: {complaint_id}")
     line(f"Generated: {now_ts()}", 18)
     line("Included files:", 18)
-
-    if not files:
-        line("  (none)")
-    else:
-        for p in files:
-            if os.path.exists(p):
-                size = os.path.getsize(p)
-                line(f"  - {os.path.basename(p)} ({size} bytes)")
-            else:
-                line(f"  - MISSING: {p}")
-
+    for p in files or []:
+        if os.path.exists(p):
+            line(f" - {os.path.basename(p)}")
     c.save()
 
 
-# -------------------- State models --------------------
+@dataclass
+class ActivityEvent:
+    ts: str
+    channel: str          # email | phone | system
+    kind: str             # sent | received | decision | status | call | docs
+    title: str
+    detail: str
+    meta: Dict[str, Any]
 
 @dataclass
 class ThreadState:
     thread_id: str
-    label: str  # agent label: airline_support / regulator / mediator ...
-    status: str = "open"  # open|waiting|resolved|abandoned|escalated
-    parent_thread_id: Optional[str] = None
-
+    label: str
+    status: str = "open"
+    stage: str = "initial_demand"
     last_handled_msg_id: Optional[str] = None
-    last_inbound: Optional[Dict[str, Any]] = None  # cached view of latest inbound
-    timeline: List[Dict[str, str]] = None
-
-    # Cross-channel state (email -> phone)
-    last_outbound_sent_at: Optional[str] = None
-    last_phone_reply: Optional[Dict[str, Any]] = None  # {ts, vendor, to, text, meta}
-
     last_decision: Optional[Dict[str, Any]] = None
-    last_draft: Optional[Dict[str, str]] = None
-    drafts: List[Dict[str, str]] = None  # store all drafts from last decision
-
-    def add_event(self, kind: str, detail: str):
-        self.timeline = self.timeline or []
-        self.timeline.append({"ts": now_ts(), "kind": kind, "detail": detail})
-
+    drafts: List[Dict[str, str]] = None
+    satisfaction: Optional[Dict[str, Any]] = None
 
 @dataclass
 class ComplaintState:
@@ -343,714 +210,456 @@ class ComplaintState:
     subject: str
     complaint_raw: str
     complaint_professional: str
+    user_email: str
+    user_name: str
     created_at: str
     docs: List[str]
     evidence_pack_pdf: Optional[str]
+    strategy: Dict[str, Any]
+    current_status_summary: str
+    final_conclusion: str
+    auto_send_policy: str
     threads: Dict[str, ThreadState]
-
-    safe_mode: bool = True
-    user_email: str = ""
-    user_name: str = ""
-    auto_send_policy: str = DEFAULT_AUTO_SEND_POLICY  # off | spawned_only | all
+    activities: List[Dict[str, Any]]
 
     def to_json(self) -> dict:
-        d = asdict(self)
-        d["threads"] = {tid: asdict(ts) for tid, ts in self.threads.items()}
-        return d
+        return {
+            "complaint_id": self.complaint_id,
+            "subject": self.subject,
+            "complaint_raw": self.complaint_raw,
+            "complaint_professional": self.complaint_professional,
+            "user_email": self.user_email,
+            "user_name": self.user_name,
+            "created_at": self.created_at,
+            "docs": self.docs,
+            "evidence_pack_pdf": self.evidence_pack_pdf,
+            "strategy": self.strategy,
+            "current_status_summary": self.current_status_summary,
+            "final_conclusion": self.final_conclusion,
+            "auto_send_policy": self.auto_send_policy,
+            "threads": {k: asdict(v) for k, v in self.threads.items()},
+            "activities": self.activities,
+        }
 
     @staticmethod
     def from_json(d: dict) -> "ComplaintState":
-        threads = {}
-        for tid, t in (d.get("threads") or {}).items():
-
-            ts = ThreadState(
-                thread_id=t["thread_id"],
-                label=t.get("label", "unknown"),
-                status=t.get("status", "open"),
-                parent_thread_id=t.get("parent_thread_id"),
-                last_handled_msg_id=t.get("last_handled_msg_id"),
-                last_inbound=t.get("last_inbound"),
-                timeline=t.get("timeline", []) or [],
-                last_outbound_sent_at=t.get("last_outbound_sent_at"),
-                last_phone_reply=t.get("last_phone_reply"),
-                last_decision=t.get("last_decision"),
-                last_draft=t.get("last_draft"),
-                drafts=t.get("drafts", []) or [],
-            )
-            threads[tid] = ts
-
-        pol = d.get("auto_send_policy", DEFAULT_AUTO_SEND_POLICY)
-        if pol not in AUTO_SEND_POLICIES:
-            pol = DEFAULT_AUTO_SEND_POLICY
-
+        threads = {k: ThreadState(**v) for k, v in (d.get("threads") or {}).items()}
         return ComplaintState(
             complaint_id=d["complaint_id"],
-            subject=d.get("subject", ""),
-            complaint_raw=d.get("complaint_raw", ""),
-            complaint_professional=d.get("complaint_professional", ""),
+            subject=d.get("subject",""),
+            complaint_raw=d.get("complaint_raw",""),
+            complaint_professional=d.get("complaint_professional",""),
+            user_email=d.get("user_email",""),
+            user_name=d.get("user_name",""),
             created_at=d.get("created_at", now_ts()),
-            docs=d.get("docs", []) or [],
+            docs=d.get("docs") or [],
             evidence_pack_pdf=d.get("evidence_pack_pdf"),
+            strategy=d.get("strategy") or {},
+            current_status_summary=d.get("current_status_summary","Complaint created."),
+            final_conclusion=d.get("final_conclusion",""),
+            auto_send_policy=d.get("auto_send_policy", DEFAULT_AUTO_SEND_POLICY),
             threads=threads,
-            safe_mode=bool(d.get("safe_mode", True)),
-            user_email=d.get("user_email", ""),
-            user_name=d.get("user_name", ""),
-            auto_send_policy=pol,
+            activities=d.get("activities") or [],
         )
 
 
-# -------------------- Manager --------------------
-
 class ComplaintWarriorManager:
-    """
-    Orchestrates multiple threads per complaint.
-
-    Key behavior:
-    - Poll Gmail threads for inbound (non-SENT) messages
-    - On inbound -> GPT decides next -> store drafts
-    - If GPT action is spawn_mediator_agent or escalate:
-        create new agent threads automatically (one per unique to_hint label)
-    - Auto-send policy per complaint:
-        off:          never auto-send
-        spawned_only: auto-send only for spawned threads (parent_thread_id != None)
-        all:          auto-send draft[0] for any thread with new drafts
-    - SEND button behavior (used by UI):
-        send draft "to agent X" => subject contains [AGENT=X], send to TEST_INBOX_EMAIL
-    """
-
-    def __init__(
-        self,
-        text_processor: TextProcessing,
-        state_file: str = STATE_FILE,
-        poll_seconds: int = DEFAULT_POLL_SECONDS,
-        log_cb: Optional[Callable[[str], None]] = None,
-        *,
-        user_email: Optional[str] = None,
-        gmail_user_key: Optional[str] = None,
-        token_db_path: str = "cw_gmail_tokens.sqlite",
-        store_db_path: str = "cw_store.sqlite",
-    ):
+    def __init__(self, text_processor: TextProcessing, log_cb: Optional[Callable[[str], None]] = None, gmail_user_key: str = "default", token_db_path: str = "cw_gmail_tokens.sqlite", complaint_db_path: Optional[str] = None):
         self.tp = text_processor
-        self.state_file = state_file
-        self.poll_seconds = poll_seconds
         self.log_cb = log_cb or (lambda s: None)
-
-        # Multi-user persistence (complaints + call results)
-        self.store_db_path = store_db_path
-        self.store = ComplaintStore(db_path=self.store_db_path)
-        self.call_store = CallResultStore(db_path=self.store_db_path)
-
-        # Active app user (complaints are scoped by this email)
-        self.active_user_email: Optional[str] = None
-        if user_email:
-            self.set_user(user_email)
-
-        # Gmail identity (token key). Default to user_email.
-        self.gmail_user_key = gmail_user_key or self.active_user_email or "default"
         self.token_db_path = token_db_path
+        self.gmail_user_key = gmail_user_key
+        self.service = None #build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
+        self.processed_label_id = None # ensure_label(self.service, LABEL_PROCESSED)
 
-        # Gmail may not be connected yet (first-time user). Allow headless init.
-        self.service = None
-        self.processed_label_id = None
-        try:
-            self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
+        self.user_email: Optional[str] = None
+        self.store = ComplaintStore(db_path=complaint_db_path or os.environ.get("CW_DB_PATH", "cw_store.sqlite"))
+        self.call_store = CallResultStore(db_path=complaint_db_path or os.environ.get("CW_DB_PATH", "cw_store.sqlite"))
+        self.complaints: Dict[str, ComplaintState] = {}
+
+    def _ensure_gmail(self):
+        if self.service is None:
+            self.service = build_gmail_service(
+                token_db_path=self.token_db_path,
+                token_key=self.gmail_user_key,
+            )
             self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
-        except Exception as e:
-            self.log_cb(f"[gmail] Not connected yet for key={self.gmail_user_key}: {e}")
 
-        self._lock = threading.RLock()
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
+    def _log(self, msg: str):
+        if self.log_cb:
+            self.log_cb(msg)
 
-        self.complaints: Dict[str, ComplaintState] = self._load_state()
-
-    # ---------- user / gmail switching (multi-user) ----------
     def set_user(self, user_email: str):
-        """Select the active app user (complaints are scoped by this email)."""
+        user_email = (user_email or "").strip().lower()
         if not user_email:
             raise ValueError("user_email is required")
-        with self._lock:
-            self.active_user_email = user_email.strip().lower()
-            # If caller didn't explicitly pick a gmail_user_key, keep them aligned.
-            if getattr(self, "gmail_user_key", None) in (None, "default"):
-                self.gmail_user_key = self.active_user_email
-            self.complaints = self._load_state()
-            self.log_cb(f"[user] Active user: {self.active_user_email}")
+        self.user_email = user_email
+        raw = self.store.load_all(user_email)
+        self.complaints = {cid: ComplaintState.from_json(js) for cid, js in raw.items()}
+        self._log(f"[manager] active app user={user_email}, complaints_loaded={len(self.complaints)}")
 
     def set_gmail_user(self, gmail_user_key: str):
-        """Switch Gmail token identity (key in cw_gmail_tokens.sqlite)."""
+        gmail_user_key = (gmail_user_key or "").strip()
         if not gmail_user_key:
             raise ValueError("gmail_user_key is required")
-        with self._lock:
-            self.gmail_user_key = gmail_user_key
-            self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
-            self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
-            self.log_cb(f"[gmail] Active Gmail key: {self.gmail_user_key}")
+        self.gmail_user_key = gmail_user_key
+        self.service = build_gmail_service(token_db_path=self.token_db_path, token_key=self.gmail_user_key)
+        self.processed_label_id = ensure_label(self.service, LABEL_PROCESSED)
+        self._log(f"[manager] switched gmail token key to {gmail_user_key}")
 
-    def _gmail(self):
-        """Return connected Gmail service or raise a clear error."""
-        if not self.service or not self.processed_label_id:
-            raise RuntimeError(
-                "Gmail is not connected for this user. "
-                "Use the UI 'Connect Gmail' flow and then select the same email as the active user."
-            )
-        return self.service
+    def _require_user(self) -> str:
+        if not self.user_email:
+            raise RuntimeError("No active app user. Set user email first.")
+        return self.user_email
 
-    # ---------- persistence ----------
-    def _load_state(self) -> Dict[str, ComplaintState]:
-        # Multi-user: load from SQLite when active_user_email is set.
-        if self.active_user_email:
-            raw_map = self.store.load_all(self.active_user_email)
-            out: Dict[str, ComplaintState] = {}
-            for cid, d in raw_map.items():
-                out[cid] = ComplaintState.from_json(d)
-            return out
+    def _save(self, cs: ComplaintState):
+        self.store.upsert(self._require_user(), cs.complaint_id, cs.to_json())
 
-        # Fallback legacy single-user JSON file.
-        if not os.path.exists(self.state_file):
-            return {}
-        with open(self.state_file, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        out: Dict[str, ComplaintState] = {}
-        for cid, d in raw.items():
-            out[cid] = ComplaintState.from_json(d)
-        return out
+    def _append_activity(self, cs: ComplaintState, channel: str, kind: str, title: str, detail: str, meta: Optional[Dict[str, Any]] = None):
+        cs.activities.append(asdict(ActivityEvent(
+            ts=now_ts(),
+            channel=channel,
+            kind=kind,
+            title=title,
+            detail=detail,
+            meta=meta or {},
+        )))
+        self._save(cs)
 
-    def _save_state(self):
-        with self._lock:
-            if self.active_user_email:
-                for cid, cs in self.complaints.items():
-                    self.store.upsert(self.active_user_email, cid, cs.to_json())
-                return
+    def list_complaints(self) -> List[ComplaintState]:
+        return list(self.complaints.values())
 
-            # Legacy fallback
-            raw = {cid: cs.to_json() for cid, cs in self.complaints.items()}
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(raw, f, ensure_ascii=False, indent=2)
+    def get_complaint(self, complaint_id: str) -> ComplaintState:
+        return self.complaints[complaint_id]
 
-    # Public helper if you want UI to update policy cleanly
+    def add_complaint(self, subject: str, complaint_raw: str, user_email: str, user_name: str, auto_send_policy: str = DEFAULT_AUTO_SEND_POLICY) -> ComplaintState:
+        self._require_user()
+        cid = f"CMP-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        prof = self.tp.rewrite_complaint_professional(complaint_raw, log_cb=self.log_cb)
+        strat = self.tp.extract_resolution_strategy(prof, log_cb=self.log_cb)
+
+        local_tid = f"LOCAL-company_support-{int(time.time()*1000)}"
+        ts = ThreadState(thread_id=local_tid, label="company_support", status="open", stage="initial_demand", drafts=[], satisfaction=None)
+
+        cs = ComplaintState(
+            complaint_id=cid,
+            subject=subject,
+            complaint_raw=complaint_raw,
+            complaint_professional=prof,
+            user_email=user_email,
+            user_name=user_name,
+            created_at=now_ts(),
+            docs=[],
+            evidence_pack_pdf=None,
+            strategy=asdict(strat),
+            current_status_summary="Initial demand ready to draft.",
+            final_conclusion="",
+            auto_send_policy=auto_send_policy,
+            threads={local_tid: ts},
+            activities=[],
+        )
+        self.complaints[cid] = cs
+        self._append_activity(cs, "system", "status", "Complaint created", "Initial demand created and ready to draft.", {"stage": "initial_demand"})
+        self._save(cs)
+        return cs
+
     def set_auto_send_policy(self, complaint_id: str, policy: str):
         if policy not in AUTO_SEND_POLICIES:
             raise ValueError(f"Invalid policy: {policy}")
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            cs.auto_send_policy = policy
-            self._save_state()
-
-    # ---------- complaint CRUD ----------
-    def add_complaint(
-        self,
-        subject: str,
-        complaint_raw: str,
-        user_email: str,
-        user_name: str,
-        safe_mode: bool = True,
-        auto_send_policy: str = DEFAULT_AUTO_SEND_POLICY,
-    ) -> ComplaintState:
-        if auto_send_policy not in AUTO_SEND_POLICIES:
-            auto_send_policy = DEFAULT_AUTO_SEND_POLICY
-
-        with self._lock:
-            cid = f"CMP-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            prof = self.tp.rewrite_complaint_professional(complaint_raw, log_cb=self.log_cb)
-
-            cs = ComplaintState(
-                complaint_id=cid,
-                subject=subject,
-                complaint_raw=complaint_raw,
-                complaint_professional=prof,
-                created_at=now_ts(),
-                docs=[],
-                evidence_pack_pdf=None,
-                threads={},
-                safe_mode=safe_mode,
-                user_email=user_email,
-                user_name=user_name,
-                auto_send_policy=auto_send_policy,
-            )
-            self.complaints[cid] = cs
-            self._save_state()
-            self.log_cb(f"Added complaint {cid} (policy={auto_send_policy})")
-            return cs
+        cs = self.complaints[complaint_id]
+        cs.auto_send_policy = policy
+        self._append_activity(cs, "system", "status", "Policy updated", f"Policy set to {policy}", {"policy": policy})
 
     def attach_docs(self, complaint_id: str, paths: List[str]):
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            for p in paths:
-                if p and os.path.exists(p) and p not in cs.docs:
-                    cs.docs.append(p)
-            self._save_state()
+        cs = self.complaints[complaint_id]
+        for p in paths or []:
+            if p and os.path.exists(p) and p not in cs.docs:
+                cs.docs.append(p)
+        self._append_activity(cs, "system", "docs", "Documents attached", f"Attached {len(paths or [])} file(s).", {"paths": paths})
+        self._save(cs)
 
     def build_evidence_pdf(self, complaint_id: str, out_path: str):
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            build_evidence_pack_pdf(out_path, complaint_id, cs.docs)
-            cs.evidence_pack_pdf = out_path
-            self._save_state()
+        cs = self.complaints[complaint_id]
+        build_evidence_pack_pdf(out_path, complaint_id, cs.docs)
+        cs.evidence_pack_pdf = out_path
+        self._append_activity(cs, "system", "docs", "Evidence pack built", os.path.basename(out_path), {"path": out_path})
+        self._save(cs)
 
-    def list_complaints(self) -> List[ComplaintState]:
-        with self._lock:
-            return list(self.complaints.values())
-
-    def get_complaint(self, complaint_id: str) -> ComplaintState:
-        with self._lock:
-            return self.complaints[complaint_id]
-
-    # ---------- thread helpers ----------
-    def _find_thread_by_label(self, cs: ComplaintState, label: str) -> Optional[str]:
-        for tid, ts in cs.threads.items():
-            if ts.label == label and ts.status not in ("abandoned", "resolved"):
-                return tid
-        return None
-
-    def create_agent_thread_seed(
-        self,
-        complaint_id: str,
-        agent_label: str,
-        parent_thread_id: Optional[str],
-        draft_email: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """
-        Auto-spawn a new agent thread by sending a seed email to TEST_INBOX_EMAIL.
-        Subject contains [AGENT=...].
-        """
-        with self._lock:
-            cs = self.complaints[complaint_id]
-
-        subj = f"[{complaint_id}] [AGENT={agent_label}] {cs.subject}"
-
-        body = f"""[AUTO-SPAWNED AGENT THREAD — TEST HARNESS]
-Complaint: {complaint_id}
-Agent: {agent_label}
-Parent thread: {parent_thread_id or '(none)'}
-
---- ORIGINAL COMPLAINT (professional) ---
-{cs.complaint_professional}
-"""
-        if draft_email:
-            body += f"""
-
---- GPT DRAFT FOR THIS AGENT ---
-Subject suggestion: {draft_email.get('subject','')}
-{draft_email.get('body','')}
-"""
-
-        attachments: List[str] = []
-        if cs.evidence_pack_pdf and os.path.exists(cs.evidence_pack_pdf):
-            attachments.append(cs.evidence_pack_pdf)
-
-        sent = send_email_with_attachments(
-            service=self._gmail(),
-            to_email=TEST_INBOX_EMAIL,
-            subject=subj,
-            body_text=body,
-            attachments=attachments,
-            thread_id=None,  # new thread
-        )
-        thread_id = sent.get("threadId")
-        if not thread_id:
-            raise RuntimeError("Gmail did not return threadId for spawned agent thread.")
-
-        with self._lock:
-            ts = ThreadState(
-                thread_id=thread_id,
-                label=agent_label,
-                status="open",
-                parent_thread_id=parent_thread_id,
-                timeline=[],
-                drafts=[],
-            )
-            # Make an initial draft available immediately
-            initial_draft = {
-                "kind": "email",
-                "to_hint": agent_label,
-                "subject": f"{cs.subject}",
-                "body": cs.complaint_professional,
-            }
-            ts.drafts = [initial_draft]
-            ts.last_draft = initial_draft
-            ts.add_event("draft_ready", "Initial opening letter created from professional complaint")
-
-            #ts.add_event("spawned", f"Spawned agent thread {agent_label} (to {TEST_INBOX_EMAIL})")
-            cs.threads[thread_id] = ts
-            self._save_state()
-
-        self.log_cb(f"Spawned new thread {thread_id} for agent={agent_label}")
-        return thread_id
-
-    # ---------- SEND behavior (UI calls this) ----------
-    def send_selected_draft_to_self(
-        self,
-        complaint_id: str,
-        thread_id: str,
-        draft_index: int,
-    ):
-        """
-        SEND button behavior:
-        - Send to TEST_INBOX_EMAIL (harness)
-        - Put agent X into subject line as [AGENT=X]
-        - Send into SAME thread (thread_id) to keep continuity
-        """
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            ts = cs.threads[thread_id]
-            drafts = ts.drafts or []
-            if not drafts or draft_index < 0 or draft_index >= len(drafts):
-                raise ValueError("Invalid draft index.")
-            d = drafts[draft_index]
-
-        agent = (d.get("to_hint") or ts.label or "unknown").strip()
-        subject = (d.get("subject") or f"Re: {cs.subject}").strip()
-        subject = f"[{complaint_id}] [AGENT={agent}] {subject}"
-
-        body = (d.get("body") or "").strip()
-        if not body:
-            body = "(empty body)"
-
-        attachments: List[str] = []
-        if cs.evidence_pack_pdf and os.path.exists(cs.evidence_pack_pdf):
-            attachments.append(cs.evidence_pack_pdf)
-        attachments += [p for p in cs.docs if os.path.exists(p)]
-
-        send_email_with_attachments(
-            service=self._gmail(),
-            to_email=TEST_INBOX_EMAIL,
-            subject=subject,
-            body_text=body,
-            attachments=attachments,
-            thread_id=thread_id,
-        )
-
-        with self._lock:
-            ts.add_event("sent", f"Sent draft[{draft_index}] to {TEST_INBOX_EMAIL} agent={agent}")
-            ts.last_outbound_sent_at = now_ts()
-            self._save_state()
-
-        self.log_cb(f"Sent draft to self: complaint={complaint_id} thread={thread_id} agent={agent}")
-
-    # ---------- Phone call integration ----------
-    def can_make_call(self, complaint_id: str, thread_id: str) -> bool:
-        """Show the 'Make a call' UI button only after at least one email was sent in this thread."""
-        with self._lock:
-            cs = self.complaints.get(complaint_id)
-            if not cs:
-                return False
-            ts = cs.threads.get(thread_id)
-            if not ts:
-                return False
-            if ts.last_outbound_sent_at:
-                return True
-            # fallback: look for any 'sent' event in timeline
-            for ev in (ts.timeline or []):
-                if ev.get("kind") == "sent":
-                    return True
-            return False
-
-    def make_support_call(
-        self,
-        complaint_id: str,
-        thread_id: str,
-        vendor_hint: Optional[str] = None,
-        timeout_s: int = 300,
-    ) -> str:
-        """
-        Places an automated support call using phone.call.ComplaintCallAgent and
-        returns the customer-support reply as text (agent-only).
-
-        This is intended to be invoked from Streamlit UI right after an email is sent.
-        """
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            ts = cs.threads[thread_id]
-
-            # Use the most informative text we have for the call.
-            # Prefer raw complaint (more detail), fallback to professional complaint.
-            user_complaint = (cs.complaint_raw or "").strip() or (cs.complaint_professional or "").strip()
-
-        if not user_complaint:
-            raise ValueError("Complaint text is empty; cannot place call.")
-
-        # Lazy import so the manager can run even if phone deps aren't installed.
-        try:
-            from call import ComplaintCallAgent
-        except Exception as e:
-            raise RuntimeError(
-                "Could not import phone.call.ComplaintCallAgent. "
-                "Ensure your phone module is available as phone/call.py and dependencies are installed. "
-                f"Import error: {e}"
-            )
-
-        agent = ComplaintCallAgent("config.ini")
-        reply = agent.call_and_get_reply_autoroute(user_complaint, vendor_hint=vendor_hint, timeout=timeout_s)
-
-        with self._lock:
-            ts.last_phone_reply = {
-                "ts": now_ts(),
-                "vendor_hint": vendor_hint or "",
-                "text": reply,
-            }
-            ts.add_event("phone_reply", "Captured customer-support reply via phone call")
-            self._save_state()
-
-        self.log_cb(f"Phone call completed: complaint={complaint_id} thread={thread_id} reply_len={len(reply)}")
-        return reply
-
-    # ---------- Auto-send policy enforcement ----------
-    def _maybe_auto_send_thread(self, complaint_id: str, thread_id: str, reason: str):
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            ts = cs.threads[thread_id]
-            policy = cs.auto_send_policy
-            drafts = ts.drafts or []
-            parent = ts.parent_thread_id
-
-        if not drafts:
-            return
-
-        if policy == "off":
-            return
-
-        if policy == "spawned_only":
-            # Only auto-send if this is a spawned thread
-            if not parent:
-                return
-
-        if policy == "all":
-            # Always auto-send first draft
-            pass
-
-        try:
-            self.send_selected_draft_to_self(complaint_id, thread_id, 0)
-            self.log_cb(f"AUTO-SENT draft[0] ({reason}) thread={thread_id}")
-        except Exception as e:
-            self.log_cb(f"ERROR: auto-send failed ({reason}) thread={thread_id}: {e}")
-
-    # ---------- Polling loop ----------
-    def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
-        self.log_cb("Manager started polling.")
-
-    def stop(self):
-        self._running = False
-        self.log_cb("Manager stopped polling.")
-
-    def _poll_loop(self):
-        while self._running:
-            try:
-                self._poll_once()
-            except Exception as e:
-                self.log_cb(f"ERROR: poll loop: {e}")
-            for _ in range(self.poll_seconds):
-                if not self._running:
-                    break
-                time.sleep(1)
-
-    def _poll_once(self):
-        with self._lock:
-            complaints = list(self.complaints.values())
-
-        for cs in complaints:
-            for thread_id, ts in list(cs.threads.items()):
-                if ts.status in ("resolved", "abandoned"):
-                    continue
-                msg = self._newest_unprocessed_inbound(thread_id, ts.last_handled_msg_id)
-                if msg:
-                    self._handle_inbound(cs.complaint_id, thread_id, msg)
-
-    def _newest_unprocessed_inbound(self, thread_id: str, last_handled_msg_id: Optional[str]) -> Optional[dict]:
-        th = get_thread(self._gmail(), thread_id)
-        messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
-        for m in reversed(messages):
-            labels = m.get("labelIds") or []
-            if self.processed_label_id in labels:
-                continue
-            if "SENT" in labels:
-                continue
-            if last_handled_msg_id and m.get("id") == last_handled_msg_id:
-                continue
-            return m
-        return None
-
-
-    def _newest_inbound_any(self, thread_id: str) -> Optional[dict]:
-        """
-        Returns newest inbound message in a thread, even if it was already marked processed.
-        We still skip Gmail 'SENT' items (outbound from you).
-        """
-        th = get_thread(self._gmail(), thread_id)
-        messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
-        for m in reversed(messages):
-            labels = m.get("labelIds") or []
-            if "SENT" in labels:
-                continue
-            return m
-        return None
-
-    def load_latest_inbound_view(self, complaint_id: str, thread_id: str) -> Optional[Dict[str, Any]]:
-        """
-        UI helper: fetch latest inbound message text (does not mark processed and does not change last_handled_msg_id).
-        Saves a cached copy into ThreadState.last_inbound for convenience.
-        """
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            ts = cs.threads[thread_id]
-
-        msg = self._newest_inbound_any(thread_id)
-        if not msg:
-            return None
-
-        payload = msg.get("payload", {}) or {}
-        headers = payload.get("headers", []) or []
-        frm = get_header(headers, "From")
-        subj = get_header(headers, "Subject")
-        date = get_header(headers, "Date")
-        labels = msg.get("labelIds") or []
-        body = decode_best_effort_text(payload).strip()
-
-        view = {
-            "message_id": msg.get("id"),
-            "from": frm,
-            "subject": subj,
-            "date": date,
-            "labels": labels,
-            "body": body,
-        }
-
-        with self._lock:
-            ts.last_inbound = view
-            ts.add_event("inbound_view", f"Viewed inbound msg={view.get('message_id')} subj={subj}")
-            self._save_state()
-
-        return view
-
-    def draft_reply_now(self, complaint_id: str, thread_id: str) -> Optional[Dict[str, Any]]:
-        """
-        UI helper: force an immediate GPT decision/draft from the newest *unprocessed* inbound.
-        Equivalent to waiting for the poller, but on-demand.
-        Returns the decision dict if a draft was created, otherwise None.
-        """
-        with self._lock:
-            cs = self.complaints[complaint_id]
-            ts = cs.threads[thread_id]
-
-        msg = self._newest_unprocessed_inbound(thread_id, ts.last_handled_msg_id)
-        if not msg:
-            return None
-
-        self._handle_inbound(complaint_id, thread_id, msg)
-        with self._lock:
-            return cs.threads[thread_id].last_decision
-
-    def _thread_transcript(self, thread_id: str) -> str:
-            th = get_thread(self._gmail(), thread_id)
+    def _combine_transcript(self, cs: ComplaintState, thread_id: str) -> str:
+        parts: List[str] = []
+        # email thread transcript if this is a Gmail thread
+        if not thread_id.startswith("LOCAL-"):
+            th = get_thread(self.service, thread_id)
             messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
-            out = []
             for m in messages:
                 payload = m.get("payload", {}) or {}
                 headers = payload.get("headers", []) or []
                 subj = get_header(headers, "Subject")
                 frm = get_header(headers, "From")
-                date = get_header(headers, "Date")
                 txt = decode_best_effort_text(payload).strip()
-                out.append(f"---\nFrom: {frm}\nDate: {date}\nSubject: {subj}\n\n{txt}\n")
-            return "\n".join(out)
+                parts.append(f"EMAIL From:{frm} Subject:{subj}\n{txt}")
 
-    def _handle_inbound(self, complaint_id: str, thread_id: str, msg: dict):
-            with self._lock:
-                cs = self.complaints[complaint_id]
-                ts = cs.threads[thread_id]
+        # phone logs for complaint
+        for ev in cs.activities:
+            if ev.get("channel") == "phone":
+                parts.append(f"PHONE {ev.get('title')}\n{ev.get('detail')}")
 
-            transcript = self._thread_transcript(thread_id)
+        return "\n\n".join(parts).strip()
 
-            payload = msg.get("payload", {}) or {}
-            headers = payload.get("headers", []) or []
-            frm = get_header(headers, "From")
-            subj = get_header(headers, "Subject")
+    def draft_reply_now(self, complaint_id: str, thread_id: str):
+        cs = self.complaints[complaint_id]
+        ts = cs.threads[thread_id]
+        strategy = ResolutionStrategy(**cs.strategy)
+        self._ensure_gmail()
+        combined = self._combine_transcript(cs, thread_id)
+        user_data = {
+            "available_docs": [os.path.basename(p) for p in cs.docs if os.path.exists(p)],
+            "evidence_pack_pdf": os.path.basename(cs.evidence_pack_pdf) if cs.evidence_pack_pdf else None,
+        }
 
-            user_data = {
-                "available_docs": [os.path.basename(p) for p in cs.docs if os.path.exists(p)],
-                "evidence_pack_pdf": os.path.basename(cs.evidence_pack_pdf) if cs.evidence_pack_pdf else None,
-            }
+        decision = self.tp.decide_next(
+            complaint_text=cs.complaint_professional,
+            complaint_stage=ts.stage,
+            current_status_summary=cs.current_status_summary,
+            combined_transcript=combined,
+            strategy=strategy,
+            user_data=user_data,
+            log_cb=self.log_cb,
+        )
+        ts.drafts = decision.drafts
+        ts.last_decision = asdict(decision)
+        ts.stage = decision.complaint_stage
 
-            context = {
-                "complaint_id": cs.complaint_id,
-                "thread_label": ts.label,
-                "thread_status": ts.status,
-                "safe_mode": cs.safe_mode,
-                "user_email": cs.user_email,
-                "user_name": cs.user_name,
-                "auto_send_policy": cs.auto_send_policy,
-            }
+        cs.current_status_summary = {
+            "initial_demand": "Initial demand drafted and ready to send.",
+            "awaiting_company_response": "Demand sent; waiting for company reply.",
+            "negotiation": "Negotiation is underway.",
+            "resolution_check": "Company appears to be offering a remedy; confirming details.",
+            "resolved": "Complaint resolved.",
+            "escalated": "Complaint escalated.",
+        }.get(ts.stage, decision.rationale)
 
-            self.log_cb(f"Inbound detected: complaint={complaint_id} thread={thread_id} from={frm}")
+        self._append_activity(
+            cs, "system", "decision", f"Drafted next step ({decision.action})",
+            decision.rationale,
+            {"thread_id": thread_id, "stage": ts.stage, "confidence": decision.confidence, "drafts": len(decision.drafts)}
+        )
+        self._save(cs)
 
-            decision: AgentDecision = self.tp.decide_next(
-                original_complaint=cs.complaint_professional,
-                thread_transcript=transcript,
-                user_data=user_data,
-                context=context,
-                log_cb=self.log_cb,
+    def send_selected_drafts(self, complaint_id: str, thread_id: str, draft_indexes: List[int], attachments: Optional[List[str]] = None) -> List[dict]:
+        cs = self.complaints[complaint_id]
+        ts = cs.threads[thread_id]
+        attachments = attachments or []
+        sent = []
+        for i in draft_indexes:
+            if i < 0 or i >= len(ts.drafts or []):
+                continue
+            d = ts.drafts[i]
+            agent = d.get("to_hint") or ts.label or "agent"
+            subject = f"[AGENT={agent}] {d.get('subject') or cs.subject}"
+            body = d.get("body") or ""
+            self._ensure_gmail()
+            res = send_email_with_attachments(
+                self.service,
+                to_email=TEST_INBOX_EMAIL,
+                subject=subject,
+                body_text=body,
+                attachments=[p for p in attachments if p and os.path.exists(p)],
+                thread_id=None if thread_id.startswith("LOCAL-") else thread_id,
+            )
+            sent.append(res)
+
+            # if local thread got sent, replace local id with actual gmail thread id if present
+            if thread_id.startswith("LOCAL-") and res.get("threadId"):
+                new_tid = res["threadId"]
+                cs.threads[new_tid] = ThreadState(
+                    thread_id=new_tid,
+                    label=ts.label,
+                    status=ts.status,
+                    stage="awaiting_company_response",
+                    last_handled_msg_id=None,
+                    last_decision=ts.last_decision,
+                    drafts=ts.drafts,
+                    satisfaction=ts.satisfaction,
+                )
+                del cs.threads[thread_id]
+                thread_id = new_tid
+                ts = cs.threads[new_tid]
+
+            self._append_activity(
+                cs, "email", "sent", "Email sent",
+                body[:500],
+                {"thread_id": thread_id, "gmail_msg_id": res.get("id"), "gmail_thread_id": res.get("threadId"), "subject": subject}
             )
 
-            # Store decision + drafts on this thread
-            with self._lock:
-                ts.last_decision = asdict(decision)
-                ts.drafts = list(decision.drafts or [])
-                ts.last_draft = (ts.drafts[0] if ts.drafts else None)
-                ts.status = decision.thread_status
-                ts.add_event("inbound", f"From {frm} / subj={subj}")
-                ts.add_event("decision", f"{decision.action} ({decision.confidence:.2f})")
+        cs.current_status_summary = "Initial demand sent; waiting for company response." if ts.stage == "awaiting_company_response" else cs.current_status_summary
+        self._save(cs)
+        return sent
+
+    def _newest_unprocessed_inbound(self, gmail_thread_id: str, last_handled_msg_id: Optional[str]) -> Optional[dict]:
+        th = get_thread(self.service, gmail_thread_id)
+        messages = sorted(th.get("messages", []) or [], key=lambda m: int(m.get("internalDate", "0")))
+        for m in reversed(messages):
+            if last_handled_msg_id and m.get("id") == last_handled_msg_id:
+                return None
+            lbls = set(m.get("labelIds") or [])
+            if self.processed_label_id in lbls or "SENT" in lbls:
+                continue
+            return m
+        return None
+
+    def _apply_satisfaction(self, cs: ComplaintState, ts: ThreadState, inbound_text: str, trusted: bool):
+        # Build strategy safely
+        strategy_data = cs.strategy or {
+            "primary_goal": "general resolution",
+            "acceptable_fallbacks": [],
+            "escalate_if": [],
+            "evidence_needed": [],
+        }
+        strategy = ResolutionStrategy(**strategy_data)
+
+        det = self.tp.detect_satisfaction_with_fallback(
+            inbound_text=inbound_text,
+            strategy=strategy,
+            trusted=trusted,
+            log_cb=self.log_cb,
+        )
+
+        ts.satisfaction = asdict(det)
+
+        # log satisfaction decision into activity timeline
+        self._append_activity(
+            cs,
+            "system",
+            "satisfaction",
+            "Satisfaction decision",
+            det.reason,
+            {
+                "thread_id": ts.thread_id,
+                "verdict": det.verdict,
+                "gpt_used": getattr(det, "gpt_used", False),
+                "signals": det.signals,
+            },
+        )
+
+        if det.verdict == "resolved":
+            ts.status = "resolved"
+            ts.stage = "resolved"
+            ts.drafts = []  # IMPORTANT: clear drafts so loop stops
+            ts.last_decision = None
+
+            cs.current_status_summary = "Company agreed to satisfy the demand. Complaint resolved."
+            cs.final_conclusion = det.reason
+
+            self._append_activity(
+                cs,
+                "system",
+                "status",
+                "Complaint resolved",
+                det.reason,
+                {
+                    "thread_id": ts.thread_id,
+                    "gpt_used": getattr(det, "gpt_used", False),
+                    "signals": det.signals,
+                },
+            )
+
+            self._save(cs)
+            return True
+
+        elif det.verdict == "rejected":
+            ts.status = "open"
+            ts.stage = "negotiation"
+            cs.current_status_summary = "Company rejected or did not accept the demand. Negotiation continues."
+            self._save(cs)
+            return False
+
+        else:
+            ts.status = "open"
+            ts.stage = "resolution_check"
+            cs.current_status_summary = "Company response is under review; clarifying whether the remedy is acceptable."
+            self._save(cs)
+            return False
+
+    def poll_once(self, trusted: bool = False):
+        self._require_user()
+        for cid, cs in list(self.complaints.items()):
+            for tid, ts in list(cs.threads.items()):
+                if tid.startswith("LOCAL-") or ts.status == "resolved":
+                    continue
+                self._ensure_gmail()
+                msg = self._newest_unprocessed_inbound(tid, ts.last_handled_msg_id)
+                if not msg:
+                    continue
+
+                payload = msg.get("payload", {}) or {}
+                headers = payload.get("headers", []) or []
+                frm = get_header(headers, "From")
+                subj = get_header(headers, "Subject")
+                inbound_text = decode_best_effort_text(payload).strip()
+
+                self._append_activity(cs, "email", "received", f"Email received from {frm}", inbound_text[:1000], {"thread_id": tid, "subject": subj, "msg_id": msg.get("id")})
                 ts.last_handled_msg_id = msg.get("id")
-                self._save_state()
+                add_label(self.service, msg["id"], self.processed_label_id)
 
-            # Mark inbound as processed to avoid loops
-            add_label(self._gmail(), msg["id"], self.processed_label_id)
+                resolved = self._apply_satisfaction(cs, ts, inbound_text=inbound_text, trusted=trusted)
 
-            # Possibly auto-send on this thread
-            self._maybe_auto_send_thread(complaint_id, thread_id, reason="inbound_decision")
+                # If resolved, stop the loop completely
+                if resolved:
+                    self._save(cs)
+                    return
 
-            # AUTO-SPAWN new agent threads if GPT wants it
-            if decision.action in ("spawn_mediator_agent", "escalate"):
-                with self._lock:
-                    cs = self.complaints[complaint_id]
-                    current_label = cs.threads[thread_id].label
+                # Otherwise continue workflow
+                self.draft_reply_now(cid, tid)
 
-                seen = set()
-                for d in (decision.drafts or []):
-                    agent = (d.get("to_hint") or "").strip()
-                    if not agent:
-                        continue
-                    if agent == current_label:
-                        continue
-                    if agent in seen:
-                        continue
-                    seen.add(agent)
+                # Manual mode still drafts but does NOT auto-send
+                if trusted and cs.auto_send_policy == "auto_send":
+                    self.send_selected_drafts(cid, tid, [0], attachments=cs.docs)
 
-                    existing_tid = self._find_thread_by_label(cs, agent)
-                    if existing_tid:
-                        with self._lock:
-                            cs.threads[existing_tid].add_event("spawn_skipped", "Thread already exists for this agent label")
-                            self._save_state()
-                        continue
+                self._save(cs)
 
-                    new_tid = self.create_agent_thread_seed(
-                        complaint_id=complaint_id,
-                        agent_label=agent,
-                        parent_thread_id=thread_id,
-                        draft_email={"subject": d.get("subject", ""), "body": d.get("body", "")},
-                    )
+    def automated_step(self, trusted: bool = False):
+        """
+        Logical sequencing:
+        1) draft/send initial demand if complaint is new and no email has been sent
+        2) poll for company reply
+        3) if unresolved, draft negotiation follow-up
+        4) if satisfied, close complaint visibly
+        """
+        self._require_user()
+        for cid, cs in list(self.complaints.items()):
+            # seed any empty complaint with a first draft
+            for tid, ts in list(cs.threads.items()):
+                if not ts.drafts and ts.status != "resolved":
+                    self.draft_reply_now(cid, tid)
+                    if trusted and cs.auto_send_policy == "auto_send" and ts.stage == "awaiting_company_response":
+                        self.send_selected_drafts(cid, tid, [0], attachments=cs.docs)
+        self._ensure_gmail()
+        self.poll_once(trusted=trusted)
 
-                    # preload drafts into spawned thread
-                    with self._lock:
-                        new_ts = cs.threads[new_tid]
-                        new_ts.drafts = [d]
-                        new_ts.last_draft = d
-                        new_ts.add_event("draft_ready", "Draft imported from parent decision")
-                        self._save_state()
+    def place_phone_call_and_capture_reply(self, complaint_id: str, thread_id: str, timeout: int = 300) -> str:
+        cs = self.complaints[complaint_id]
+        ts = cs.threads[thread_id]
+        if ComplaintCallAgent is None:
+            raise RuntimeError("Phone module is not available (ComplaintCallAgent import failed).")
 
-                    # Possibly auto-send spawned thread
-                    self._maybe_auto_send_thread(complaint_id, new_tid, reason="spawned_thread")
+        agent = ComplaintCallAgent("config.ini")
+        reply = agent.call_and_get_reply_autoroute(cs.complaint_professional, timeout=timeout)
+
+        self.call_store.set(f"{complaint_id}:{thread_id}:{int(time.time())}", {"transcript": reply})
+        self._append_activity(cs, "phone", "received", "Phone call reply", reply[:2000], {"thread_id": thread_id})
+        resolved = self._apply_satisfaction(
+            cs,
+            ts,
+            inbound_text=reply,
+            trusted=(cs.auto_send_policy == "auto_send"),
+        )
+
+        if resolved:
+            self._save(cs)
+            return reply
+
+        self.draft_reply_now(complaint_id, thread_id)
+        self._save(cs)
+        return reply
+

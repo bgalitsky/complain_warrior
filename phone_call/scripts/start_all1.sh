@@ -8,7 +8,7 @@ if [[ -z "$PUBLIC_BASE" && -n "$CW_OAUTH_BASE_URL" ]]; then
   PUBLIC_BASE="$CW_OAUTH_BASE_URL"
 fi
 
-APP_DIR="/home/ec2-user/phone_call"
+APP_DIR="/home/ec2-user/phone_call1"
 PID_DIR="$APP_DIR/pids"
 LOG_DIR="$APP_DIR/logs"
 
