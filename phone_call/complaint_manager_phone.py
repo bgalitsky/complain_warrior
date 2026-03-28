@@ -644,7 +644,13 @@ class ComplaintWarriorManager:
             raise RuntimeError("Phone module is not available (ComplaintCallAgent import failed).")
 
         agent = ComplaintCallAgent("config.ini")
-        reply = agent.call_and_get_reply_autoroute(cs.complaint_professional, timeout=timeout)
+        reply = agent.call_and_get_reply_autoroute(
+            user_complaint=cs.complaint_raw or cs.complaint_professional,
+            vendor_hint=None if ts.label in ("company_support", "agent") else ts.label,
+            timeout=timeout,
+            complaint_stage=ts.stage,
+            current_status_summary=cs.current_status_summary,
+        )
 
         self.call_store.set(f"{complaint_id}:{thread_id}:{int(time.time())}", {"transcript": reply})
         self._append_activity(cs, "phone", "received", "Phone call reply", reply[:2000], {"thread_id": thread_id})

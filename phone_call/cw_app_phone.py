@@ -23,6 +23,12 @@ def _log(msg: str):
     st.session_state.logs.append(msg)
     st.session_state.logs = st.session_state.logs[-500:]
 
+def _init_state():
+    if "logs" not in st.session_state:
+        st.session_state.logs = []
+    if "manager" not in st.session_state:
+        st.session_state.manager = None
+
 
 def _list_gmail_token_keys(db_path: str) -> List[str]:
     try:
@@ -46,7 +52,7 @@ def _ensure_manager():
         st.session_state.logs = []
     if "tp" not in st.session_state:
         st.session_state.tp = TextProcessing()
-    if "manager" not in st.session_state:
+    if "manager" not in st.session_state or st.session_state.manager is None:
         st.session_state.manager = ComplaintWarriorManager(st.session_state.tp, log_cb=_log)
     if "app_user_email" not in st.session_state:
         st.session_state.app_user_email = ""
@@ -74,6 +80,7 @@ def _save_uploads(files) -> List[str]:
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+    _init_state()
     _ensure_manager()
 
     # Header / logo
@@ -128,7 +135,7 @@ def main():
             except Exception as e:
                 st.error(f"Automated step failed: {e}")
 
-    if not st.session_state.manager.user_email:
+    if st.session_state.manager is None or not st.session_state.manager.user_email:
         st.info("In the sidebar, set your app email and click **Use this account**.")
         st.stop()
 
@@ -190,9 +197,18 @@ def main():
         # resolution strategy/status
         st.subheader("2) Resolution strategy and current status")
         s1, s2, s3 = st.columns(3)
-        s1.metric("Primary goal", cs.strategy.get("primary_goal", ""))
-        s2.metric("Current status", cs.current_status_summary)
-        s3.metric("Conclusion", cs.final_conclusion or "Open")
+
+        with s1:
+            st.caption("Primary goal")
+            st.write(cs.strategy.get("primary_goal", "") or "—")
+
+        with s2:
+            st.caption("Current status")
+            st.write(cs.current_status_summary or "—")
+
+        with s3:
+            st.caption("Conclusion")
+            st.write(cs.final_conclusion or "Open")
         with st.expander("Resolution strategy detail", expanded=True):
             st.write({
                 "primary_goal": cs.strategy.get("primary_goal"),

@@ -1,5 +1,3 @@
-# call.py
-
 # ngrok http 5000
 
 import json
@@ -17,12 +15,12 @@ from openai import OpenAI
 
 class ComplaintCallAgent:
     """
-    High-level callable from Gmail Complaint Warrior:
-
-      reply = ComplaintCallAgent("config.ini").call_and_get_reply_autoroute(user_complaint)
+    High-level callable from Gmail Complaint Warrior.
 
     This will:
-      - use GPT to rewrite a phone script and propose support numbers (and vendor)
+      - extract a phone number directly from the complaint if one is present
+      - use GPT to identify the vendor / business and discover likely support numbers
+      - generate a spoken phone script from the initial complaint and current resolution state
       - place call(s) via Twilio
       - wait for inbound (agent) transcription
       - return agent reply text (string)
@@ -39,9 +37,9 @@ class ComplaintCallAgent:
 
         # Twilio
         self.account_sid = self.cfg["twilio"]["account_sid"].strip()
-        self.auth_token  = self.cfg["twilio"]["auth_token"].strip()
+        self.auth_token = self.cfg["twilio"]["auth_token"].strip()
         self.from_number = self.cfg["twilio"]["from_number"].strip()
-        self.amd_mode    = self.cfg.get("behavior", "amd_mode", fallback="DetectMessageEnd").strip()
+        self.amd_mode = self.cfg.get("behavior", "amd_mode", fallback="DetectMessageEnd").strip()
         self.twilio = TwilioClient(self.account_sid, self.auth_token)
 
         # OpenAI (GPT)
@@ -75,41 +73,131 @@ class ComplaintCallAgent:
                 return v
         return []
 
+    # -------------------- extraction helpers --------------------
+
+    @staticmethod
+    def _clean_whitespace(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "")).strip()
+
+    @staticmethod
+    def _extract_phone_candidates(text: str) -> List[str]:
+        text = text or ""
+        # Accept common US/international forms, normalize to E.164 when possible.
+        pattern = re.compile(r"(?<!\w)(\+?\d[\d\s().\-]{7,}\d)")
+        out: List[str] = []
+        seen = set()
+        for raw in pattern.findall(text):
+            digits = re.sub(r"\D", "", raw)
+            if len(digits) == 10:
+                normalized = "+1" + digits
+            elif len(digits) == 11 and digits.startswith("1"):
+                normalized = "+" + digits
+            elif len(digits) >= 11 and raw.strip().startswith("+"):
+                normalized = "+" + digits
+            else:
+                continue
+            if normalized not in seen:
+                out.append(normalized)
+                seen.add(normalized)
+        return out
+
+    @staticmethod
+    def _extract_business_name_hint(text: str) -> str:
+        text = text or ""
+        patterns = [
+            r"(?:business|company|merchant|vendor|store|hotel|airline|restaurant)\s*(?:name)?\s*[:\-]\s*([^\n,.;]{2,80})",
+            r"(?:at|from|with)\s+([A-Z][A-Za-z0-9&'.,\- ]{2,80}?)(?=(?:\s+located\s+at|\s+at\s+\d|\s*,\s*\d|[\n.;]|$))",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                return ComplaintCallAgent._clean_whitespace(m.group(1).strip(" ,.-"))
+        return ""
+
+    @staticmethod
+    def _extract_business_address_hint(text: str) -> str:
+        text = text or ""
+        patterns = [
+            r"(?:address|located at|business address)\s*[:\-]?\s*([^\n]{8,160})",
+            r"(\d{1,6}\s+[A-Za-z0-9.#'\- ]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Suite|Ste)\b[^\n,.;]{0,120})",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                return ComplaintCallAgent._clean_whitespace(m.group(1).strip(" ,.-"))
+        return ""
+
+    def _safe_json_loads(self, raw: str) -> Dict[str, Any]:
+        raw = (raw or "").strip()
+        if not raw:
+            raise ValueError("Empty model output")
+        try:
+            return json.loads(raw)
+        except Exception:
+            m = re.search(r"\{.*\}", raw, re.S)
+            if not m:
+                raise
+            return json.loads(m.group(0))
+
     # -------------------- GPT: reformulate + discover numbers --------------------
 
-    def reformulate_for_call(self, user_complaint: str, vendor_hint: Optional[str] = None) -> Dict[str, Any]:
+    def reformulate_for_call(
+        self,
+        user_complaint: str,
+        vendor_hint: Optional[str] = None,
+        complaint_stage: Optional[str] = None,
+        current_status_summary: Optional[str] = None,
+        business_name_hint: Optional[str] = None,
+        business_address_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Returns:
           {
             "vendor": str,
+            "business_name": str,
+            "business_address": str,
             "call_script": str,
-            "to_numbers": [{number,is_ivr,ivr_digits,ivr_wait,label,confidence}, ...],
+            "to_numbers": [{number,is_ivr,ivr_digits,ivr_wait,label,confidence,source}, ...],
             "needs_verification": bool,
             "notes": str
           }
         """
         user_complaint = (user_complaint or "").strip()
+        complaint_stage = (complaint_stage or "").strip()
+        current_status_summary = (current_status_summary or "").strip()
+
         if not user_complaint:
             return {
                 "vendor": vendor_hint or "",
+                "business_name": business_name_hint or "",
+                "business_address": business_address_hint or "",
                 "call_script": "Hello. I have a customer complaint and I need help resolving it.",
                 "to_numbers": [],
                 "needs_verification": True,
-                "notes": "Empty complaint."
+                "notes": "Empty complaint.",
             }
 
+        direct_numbers = self._extract_phone_candidates(user_complaint)
+        business_name_hint = (business_name_hint or self._extract_business_name_hint(user_complaint) or vendor_hint or "").strip()
+        business_address_hint = (business_address_hint or self._extract_business_address_hint(user_complaint) or "").strip()
+
         system = (
-            "You prepare automated customer-support phone calls.\n"
+            "You prepare automated customer-support phone calls. "
             "Return ONLY valid JSON matching the schema.\n\n"
-            "Goal:\n"
-            "1) Rewrite the complaint into a short spoken script (max ~6 sentences), polite but firm.\n"
-            "2) Identify the most likely vendor/company.\n"
-            "3) Provide likely US customer support phone numbers in E.164 format (+1...).\n"
-            "4) If you know IVR navigation, provide digits using 'w' for pauses (e.g., 'wwww0ww1').\n"
-            "If unsure about phone numbers, set needs_verification=true.\n\n"
+            "Task:\n"
+            "1) Build a short spoken call script (max about 6 sentences) from the initial complaint and the current resolution state.\n"
+            "2) Identify the most likely business/vendor name.\n"
+            "3) Infer or confirm the business address if possible.\n"
+            "4) Provide the best support/customer-service phone numbers in E.164 format (+1...).\n"
+            "5) If a phone number already appears in the complaint, include it with high confidence and source='complaint_text'.\n"
+            "6) If the business name and/or address is given, use that to choose the most plausible support number.\n"
+            "7) If you know IVR navigation, provide digits using 'w' for pauses (e.g., 'wwww0ww1').\n"
+            "8) If uncertain, set needs_verification=true.\n\n"
             "Schema:\n"
             "{\n"
             '  "vendor": "string",\n'
+            '  "business_name": "string",\n'
+            '  "business_address": "string",\n'
             '  "call_script": "string",\n'
             '  "to_numbers": [\n'
             "    {\n"
@@ -118,7 +206,8 @@ class ComplaintCallAgent:
             '      "ivr_digits": "string",\n'
             '      "ivr_wait": integer,\n'
             '      "label": "string",\n'
-            '      "confidence": number\n'
+            '      "confidence": number,\n'
+            '      "source": "string"\n'
             "    }\n"
             "  ],\n"
             '  "needs_verification": boolean,\n'
@@ -126,75 +215,105 @@ class ComplaintCallAgent:
             "}\n"
         )
 
-        user_payload = {"vendor_hint": vendor_hint or "", "complaint": user_complaint}
+        user_payload = {
+            "vendor_hint": vendor_hint or "",
+            "business_name_hint": business_name_hint,
+            "business_address_hint": business_address_hint,
+            "complaint_stage": complaint_stage,
+            "current_status_summary": current_status_summary,
+            "complaint": user_complaint,
+            "direct_numbers_found_in_complaint": direct_numbers,
+        }
 
-        resp = self.oa.chat.completions.create(
-            model=self.openai_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
-            ],
-            temperature=0.2
-        )
-
-        raw = (resp.choices[0].message.content or "").strip()
         try:
-            data = json.loads(raw)
-        except Exception:
+            resp = self.oa.chat.completions.create(
+                model=self.openai_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                temperature=0.2,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = self._safe_json_loads(raw)
+        except Exception as e:
             data = {
-                "vendor": vendor_hint or "",
+                "vendor": vendor_hint or business_name_hint or "",
+                "business_name": business_name_hint or vendor_hint or "",
+                "business_address": business_address_hint or "",
                 "call_script": user_complaint[:800],
                 "to_numbers": [],
                 "needs_verification": True,
-                "notes": "GPT did not return valid JSON."
+                "notes": f"GPT did not return valid JSON: {e}",
             }
 
-        vendor = (data.get("vendor") or vendor_hint or "").strip()
+        vendor = (data.get("vendor") or vendor_hint or business_name_hint or "").strip()
+        business_name = (data.get("business_name") or business_name_hint or vendor or "").strip()
+        business_address = (data.get("business_address") or business_address_hint or "").strip()
         data["vendor"] = vendor
+        data["business_name"] = business_name
+        data["business_address"] = business_address
 
-        # Merge with directory (prefer directory first)
-        directory = self._dir_lookup(vendor)
-        merged = []
+        # Merge sources in priority order: complaint text -> trusted directory -> GPT discovered numbers
+        merged: List[Dict[str, Any]] = []
         seen = set()
 
-        def norm_num(n: str) -> str:
-            return (n or "").strip()
+        def add_number(number: str, *, source: str, label: str, confidence: float, is_ivr: bool = False,
+                       ivr_digits: str = "", ivr_wait: int = 10):
+            n = (number or "").strip()
+            if not n or n in seen:
+                return
+            merged.append({
+                "number": n,
+                "is_ivr": bool(is_ivr),
+                "ivr_digits": str(ivr_digits or "").strip(),
+                "ivr_wait": int(ivr_wait or 10),
+                "label": str(label or "").strip(),
+                "confidence": float(confidence or 0.5),
+                "source": source,
+            })
+            seen.add(n)
 
+        for n in direct_numbers:
+            add_number(n, source="complaint_text", label="number from complaint", confidence=0.99)
+
+        directory = self._dir_lookup(vendor or business_name)
         for d in directory:
-            n = norm_num(d.get("number"))
-            if n and n not in seen:
-                merged.append(d)
-                seen.add(n)
+            add_number(
+                str(d.get("number", "")),
+                source="vendor_directory",
+                label=str(d.get("label", "trusted directory") or "trusted directory"),
+                confidence=float(d.get("confidence", 0.98) or 0.98),
+                is_ivr=bool(d.get("is_ivr", False)),
+                ivr_digits=str(d.get("ivr_digits", "") or ""),
+                ivr_wait=int(d.get("ivr_wait", 10) or 10),
+            )
 
         for g in (data.get("to_numbers") or []):
-            n = norm_num(g.get("number"))
-            if n and n not in seen:
-                merged.append(g)
-                seen.add(n)
+            add_number(
+                str(g.get("number", "")),
+                source=str(g.get("source", "gpt") or "gpt"),
+                label=str(g.get("label", "") or ""),
+                confidence=float(g.get("confidence", 0.5) or 0.5),
+                is_ivr=bool(g.get("is_ivr", False)),
+                ivr_digits=str(g.get("ivr_digits", "") or ""),
+                ivr_wait=int(g.get("ivr_wait", 10) or 10),
+            )
 
-        # Clean + normalize
-        cleaned = []
-        for x in merged:
-            n = norm_num(str(x.get("number", "")))
-            if not n:
-                continue
-            cleaned.append({
-                "number": n,
-                "is_ivr": bool(x.get("is_ivr", False)),
-                "ivr_digits": str(x.get("ivr_digits", "") or "").strip(),
-                "ivr_wait": int(x.get("ivr_wait", 10) or 10),
-                "label": str(x.get("label", "") or "").strip(),
-                "confidence": float(x.get("confidence", 0.5) or 0.5),
-            })
-
-        data["to_numbers"] = cleaned
-        data.setdefault("call_script", "")
+        data["to_numbers"] = merged
+        data["call_script"] = self._clean_whitespace(data.get("call_script") or "")
         data.setdefault("needs_verification", True)
         data.setdefault("notes", "")
 
-        # If we have directory entries, that’s your “trusted” source
-        if directory:
+        # Complaint number / directory entries count as more trusted than GPT-only discovery.
+        if direct_numbers or directory:
             data["needs_verification"] = False
+
+        if not data["call_script"]:
+            data["call_script"] = (
+                "Hello. I am calling about an unresolved customer complaint. "
+                "Please review the case and help me resolve it today."
+            )
 
         return data
 
@@ -228,10 +347,8 @@ class ComplaintCallAgent:
                 from_=self.from_number,
                 url=voice_url,
                 method="POST",
-
                 machine_detection=self.amd_mode,
                 async_amd=True,
-
                 status_callback=status_url,
                 status_callback_method="POST",
                 status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -270,7 +387,6 @@ class ComplaintCallAgent:
                 time.sleep(1)
                 continue
 
-            # after inbound appears, wait idle window and confirm stable
             time.sleep(idle_after_inbound)
             try:
                 data2 = self._fetch_result(call_sid)
@@ -284,7 +400,6 @@ class ComplaintCallAgent:
             last = tr2
             time.sleep(1)
 
-        # timeout fallback
         try:
             return self._fetch_result(call_sid).get("transcript", "") or ""
         except Exception:
@@ -301,26 +416,42 @@ class ComplaintCallAgent:
     # -------------------- one-shot API for Complaint Warrior --------------------
 
     def call_and_get_reply_autoroute(
-        self,
-        user_complaint: str,
-        vendor_hint: Optional[str] = None,
-        timeout: int = 300
+            self,
+            user_complaint: str,
+            vendor_hint: Optional[str] = None,
+            timeout: int = 300,
+            complaint_stage: Optional[str] = None,
+            current_status_summary: Optional[str] = None,
     ) -> str:
         """
-        Main entry for Gmail Complaint Warrior:
-          - GPT reformulates complaint + proposes numbers
-          - we call first number (or you can loop through all)
-          - we return agent reply as string
+        Main entry:
+          - build script + numbers from complaint/current state
+          - place call
+          - return agent reply
         """
-        plan = {} #self.reformulate_for_call(user_complaint, vendor_hint=vendor_hint)
-        call_script = plan.get("call_script", "").strip()
-        to_numbers = ["+12092084065"] #plan.get("to_numbers", [])
+        plan = self.reformulate_for_call(
+            user_complaint=user_complaint,
+            vendor_hint=vendor_hint,
+            complaint_stage=complaint_stage,
+            current_status_summary=current_status_summary,
+        )
+
+        call_script = (plan.get("call_script") or "").strip()
+        to_numbers = plan.get("to_numbers") or []
 
         if not call_script:
-            call_script = "Hello. I have a customer complaint and I need help resolving it."
+            src = (user_complaint or "").strip()
+            if src:
+                call_script = src[:800]
+            else:
+                call_script = "Hello. I have a customer complaint and I need help resolving it."
 
         if not to_numbers:
             return ""
+
+        print("DEBUG call_script:", repr(call_script))
+        print("DEBUG to_numbers:", to_numbers)
+        print("DEBUG plan:", json.dumps(plan, ensure_ascii=False, indent=2))
 
         results = self.make_calls(to_numbers, call_script)
         if not results:
@@ -334,8 +465,10 @@ class ComplaintCallAgent:
 if __name__ == "__main__":
     agent = ComplaintCallAgent("config.ini")
     reply = agent.call_and_get_reply_autoroute(
-        "I missed my flight connection due to a delay on the first leg. I want reimbursement and compensation.",
+        "I missed my flight connection due to a delay on the first leg. I want reimbursement and compensation. The airline is Southwest.",
         vendor_hint="Southwest",
-        timeout=300
+        complaint_stage="negotiation",
+        current_status_summary="The airline has not yet offered reimbursement for hotel and meal expenses.",
+        timeout=300,
     )
     print("\nAGENT REPLY:\n", reply)
