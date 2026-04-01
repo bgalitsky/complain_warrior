@@ -1,0 +1,82 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/27.0.5 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36" version="27.0.5">
+  <diagram id="metadata_manipulation_logic" name="Логика контроля и манипуляции внутренними метаданными">
+    <mxGraphModel dx="1901" dy="1281" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="start" value="Контроль над файлом&#xa;до изъятия" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" parent="1" vertex="1">
+          <mxGeometry x="550" y="40" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="core" value="Полный контроль над&#xa;внутренними метаданными" style="rounded=1;whiteSpace=wrap;html=1;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="500" y="170" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="exif" value="Изменение EXIF&#xa;• DateTimeOriginal&#xa;• GPS&#xa;• Make/Model&#xa;• Software&#xa;(ExifTool)" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="80" y="340" width="350" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="maker" value="Клонирование MakerNotes&#xa;• -tagsFromFile&#xa;• Побайтовый перенос&#xa;• «Цифровой отпечаток» камеры" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="460" y="340" width="350" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="xmp" value="Редактирование XMP/IPTC&#xa;• XML-блоки&#xa;• Дублирование тегов&#xa;• История обработки" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="840" y="340" width="350" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="pdf" value="Манипуляция PDF&#xa;• CreationDate / ModDate&#xa;• Author / Producer&#xa;• Пересборка xref&#xa;• Инкрементальные обновления" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="200" y="540" width="400" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="anti" value="Антифорензика&#xa;• Очистка сегментов JPEG&#xa;• Нормализация структуры&#xa;• Симуляция профиля камеры&#xa;• Удаление истории" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="720" y="540" width="400" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="decision" value="Выявлены несогласованности&#xa;между метаданными&#xa;и контентом?" style="rhombus;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="450" y="749" width="400" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="out1" value="Да&#xa;Обнаружены признаки&#xa;редактирования / подмены" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="150" y="1000" width="400" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="out2" value="Нет&#xa;Признаков изменений не выявлено&#xa;(но аутентичность не доказана)" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="750" y="1000" width="400" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="end" value="Экспертный вывод&#xa;с указанием ограничений метода" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" parent="1" vertex="1">
+          <mxGeometry x="550" y="1200" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="endArrow=block;" parent="1" source="start" target="core" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="endArrow=block;" parent="1" source="core" target="exif" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="endArrow=block;" parent="1" source="core" target="maker" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="endArrow=block;" parent="1" source="core" target="xmp" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="endArrow=block;" parent="1" source="exif" target="pdf" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="endArrow=block;" parent="1" source="maker" target="anti" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="endArrow=block;" parent="1" source="xmp" target="anti" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="endArrow=block;" parent="1" source="pdf" target="decision" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="endArrow=block;" parent="1" source="anti" target="decision" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="Да" style="endArrow=block;" parent="1" source="decision" target="out1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="Нет" style="endArrow=block;" parent="1" source="decision" target="out2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="endArrow=block;" parent="1" source="out1" target="end" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="endArrow=block;" parent="1" source="out2" target="end" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

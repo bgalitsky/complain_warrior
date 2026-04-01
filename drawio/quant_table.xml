@@ -1,0 +1,97 @@
+<mxfile host="app.diagrams.net" modified="2026-02-17T00:00:00.000Z" agent="ChatGPT" version="24.7.8">
+  <diagram id="jpeg_qt_algo" name="Алгоритм анализа таблиц квантования JPEG">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- START -->
+        <mxCell id="start" value="Старт&#xa;Получен исследуемый JPEG-файл (Q)" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="300" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- STEP 1 -->
+        <mxCell id="step1" value="1. Структурная валидация JPEG&#xa;• Проверка SOI/EOI&#xa;• Анализ маркеров (APP, DQT, DHT, SOF, SOS)&#xa;• Baseline / Progressive&#xa;• Фиксация структуры файла" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="160" width="440" height="130" as="geometry"/>
+        </mxCell>
+
+        <!-- STEP 2 -->
+        <mxCell id="step2" value="2. Извлечение сегментов DQT&#xa;• Определение Pq и Tq&#xa;• Получение 64 коэффициентов&#xa;• Преобразование zig-zag → 8×8 матрица&#xa;• Сохранение сырого дампа" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="320" width="440" height="150" as="geometry"/>
+        </mxCell>
+
+        <!-- STEP 3 -->
+        <mxCell id="step3" value="3. Статистический анализ таблиц&#xa;• Среднее / дисперсия&#xa;• Структура частот&#xa;• Сравнение Y и CbCr&#xa;• Определение типа (камера / ПО)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="500" width="440" height="130" as="geometry"/>
+        </mxCell>
+
+        <!-- STEP 4 -->
+        <mxCell id="step4" value="4. Сопоставление с базой DB_QT&#xa;• Полное совпадение&#xa;• Масштабированное совпадение&#xa;• Расстояние между матрицами&#xa;• Определение вероятного источника" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="430" y="660" width="440" height="150" as="geometry"/>
+        </mxCell>
+
+        <!-- DECISION 1 -->
+        <mxCell id="decision1" value="Совпадает ли таблица&#xa;с известным профилем?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="470" y="850" width="360" height="170" as="geometry"/>
+        </mxCell>
+
+        <!-- YES BRANCH -->
+        <mxCell id="yes1" value="5A. Проверка согласованности&#xa;• EXIF vs QT&#xa;• Цветовое подвыборивание&#xa;• Разрешение / режим съемки&#xa;• Признаки двойной компрессии" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="150" y="1070" width="400" height="170" as="geometry"/>
+        </mxCell>
+
+        <!-- NO BRANCH -->
+        <mxCell id="no1" value="5B. Таблица нехарактерна&#xa;• Возможна повторная компрессия&#xa;• Использование графического редактора&#xa;• Потенциальная модификация файла" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="750" y="1070" width="400" height="170" as="geometry"/>
+        </mxCell>
+
+        <!-- DECISION 2 -->
+        <mxCell id="decision2" value="Обнаружены несогласованности&#xa;или признаки клонирования?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1280" width="360" height="170" as="geometry"/>
+        </mxCell>
+
+        <!-- OUTCOME 1 -->
+        <mxCell id="out1" value="Исход A&#xa;Таблицы соответствуют заявленному источнику&#xa;Несогласованности не выявлены&#xa;(вероятностный вывод)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="1500" width="420" height="160" as="geometry"/>
+        </mxCell>
+
+        <!-- OUTCOME 2 -->
+        <mxCell id="out2" value="Исход B&#xa;Выявлены признаки обработки / повторной компрессии&#xa;Источник требует уточнения" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="540" y="1500" width="420" height="160" as="geometry"/>
+        </mxCell>
+
+        <!-- OUTCOME 3 -->
+        <mxCell id="out3" value="Исход C&#xa;Высокий риск клонирования структуры JPEG&#xa;QT не доказывает происхождение&#xa;Требуется анализ PRNU / сенсорного шума" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="1500" width="420" height="160" as="geometry"/>
+        </mxCell>
+
+        <!-- END -->
+        <mxCell id="end" value="Формулировка экспертного вывода&#xa;с указанием ограничений метода" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="1">
+          <mxGeometry x="500" y="1700" width="300" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- CONNECTORS -->
+        <mxCell id="e1" style="endArrow=block;" edge="1" parent="1" source="start" target="step1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" style="endArrow=block;" edge="1" parent="1" source="step1" target="step2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" style="endArrow=block;" edge="1" parent="1" source="step2" target="step3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" style="endArrow=block;" edge="1" parent="1" source="step3" target="step4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" style="endArrow=block;" edge="1" parent="1" source="step4" target="decision1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e6" value="Да" style="endArrow=block;" edge="1" parent="1" source="decision1" target="yes1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e7" value="Нет" style="endArrow=block;" edge="1" parent="1" source="decision1" target="no1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e8" style="endArrow=block;" edge="1" parent="1" source="yes1" target="decision2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e9" style="endArrow=block;" edge="1" parent="1" source="no1" target="decision2"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e10" value="Нет" style="endArrow=block;" edge="1" parent="1" source="decision2" target="out1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e11" value="Да (обработка)" style="endArrow=block;" edge="1" parent="1" source="decision2" target="out2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e12" value="Да (клонирование)" style="endArrow=block;" edge="1" parent="1" source="decision2" target="out3"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e13" style="endArrow=block;" edge="1" parent="1" source="out1" target="end"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e14" style="endArrow=block;" edge="1" parent="1" source="out2" target="end"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e15" style="endArrow=block;" edge="1" parent="1" source="out3" target="end"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

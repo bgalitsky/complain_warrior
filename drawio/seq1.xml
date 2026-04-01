@@ -1,0 +1,165 @@
+<mxfile host="app.diagrams.net" modified="2026-02-17T00:00:00.000Z" agent="ChatGPT" version="24.7.8">
+  <diagram id="algo_dostovernost" name="Алгоритм оценки достоверности цифровых доказательств (AI+криминалистика)">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Styles (kept inline per-cell, minimal) -->
+
+        <!-- Start / End -->
+        <mxCell id="start" value="Старт&#xa;Поступление цифрового объекта" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="1">
+          <mxGeometry x="90" y="70" width="220" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="end" value="Финиш&#xa;Судебная оценка&#xa;(с учетом ограничений)" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="1">
+          <mxGeometry x="90" y="960" width="220" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- Main process blocks -->
+        <mxCell id="p1" value="1) Фиксация цепочки хранения (Chain of Custody)&#xa;• кто/когда/где изъял&#xa;• условия хранения/передачи&#xa;• журналы доступа" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="180" width="260" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p2" value="2) Получение образа/копии&#xa;• бит-в-бит (forensic image)&#xa;• write-blocker&#xa;• протоколирование" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="320" width="260" height="110" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p3" value="3) Криптографические контрольные суммы&#xa;• SHA-256/ГОСТ&#xa;• хэш исходника и образа&#xa;• проверка неизменности" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="450" width="260" height="110" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p4" value="4) Анализ формальных атрибутов&#xa;• метаданные файла&#xa;• временные метки (MAC-times)&#xa;• сигнатуры формата/контейнера" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="580" width="260" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p5" value="5) Контентная криминалистика&#xa;• следы монтажа/пересжатия&#xa;• ELA/PRNU (если применимо)&#xa;• аудио: спектральные артефакты&#xa;• видео: GOP/тайминг" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="720" width="260" height="140" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p6" value="6) AI-анализ аномалий и правдоподобия&#xa;• детекторы синтетики/дипфейков&#xa;• поиск несогласованностей (сцена/текст/голос)&#xa;• оценка уверенности модели" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="720" width="300" height="140" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p7" value="7) Проверка происхождения (provenance)&#xa;• доверенные логи/сервисы&#xa;• подписи устройства/ПО&#xa;• подтверждение источника (если есть)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="580" width="300" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p8" value="8) Модель угроз и антифорензика&#xa;• мог ли злоумышленник подготовить объект заранее?&#xa;• есть ли признаки целевого обхода экспертизы?&#xa;• уровень доступа/квалификация" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="450" width="300" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p9" value="9) Интегральная оценка надежности&#xa;• матрица факторов (техника/контекст/происхождение)&#xa;• качественная шкала: высокая / средняя / низкая&#xa;• указание неизбежной неопределенности" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="320" width="300" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="p10" value="10) Формулировка экспертного вывода&#xa;• «признаков монтажа не выявлено»&#xa;• «исключить преднамеренную фальсификацию нельзя»&#xa;• перечислить примененные методики X/Y/Z" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="180" width="300" height="120" as="geometry"/>
+        </mxCell>
+
+        <!-- Decision nodes -->
+        <mxCell id="d1" value="Достаточно ли&#xa;доверенного происхождения&#xa;(подписи/логи/CoC)?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="740" y="560" width="220" height="160" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="d2" value="Выявлены признаки&#xa;манипуляции/синтетики?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="740" y="740" width="220" height="140" as="geometry"/>
+        </mxCell>
+
+        <!-- Outcome blocks -->
+        <mxCell id="o1" value="Исход A:&#xa;Повышенная надежность&#xa;• происхождение подтверждено&#xa;• артефактов не выявлено&#xa;• риски антифорензики низкие" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="560" width="310" height="150" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="o2" value="Исход B:&#xa;Ограниченная надежность&#xa;• происхождение не подтверждено полностью&#xa;• «absence of evidence ≠ evidence of absence»&#xa;• требуется усиление контекстом/иными доказательствами" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="730" width="310" height="170" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="o3" value="Исход C:&#xa;Низкая надежность / спорное доказательство&#xa;• признаки манипуляции/синтетики&#xa;• высокий риск целевой антифорензики&#xa;• рекомендовать осторожность/исключение/доп. проверку" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="910" width="310" height="170" as="geometry"/>
+        </mxCell>
+
+        <!-- Connectors -->
+        <mxCell id="e_start_p1" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="start" target="p1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_p1_p2" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p1" target="p2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_p2_p3" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p2" target="p3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_p3_p4" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p3" target="p4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_p4_p5" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p4" target="p5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Parallel branch to provenance + anti-forensics -->
+        <mxCell id="e_p4_p7" style="endArrow=block;html=1;rounded=0;dashed=1;" edge="1" parent="1" source="p4" target="p7">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_p3_p8" style="endArrow=block;html=1;rounded=0;dashed=1;" edge="1" parent="1" source="p3" target="p8">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- AI analysis after content forensics -->
+        <mxCell id="e_p5_p6" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p5" target="p6">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Decisions -->
+        <mxCell id="e_p7_d1" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p7" target="d1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_p6_d2" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p6" target="d2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Decision outcomes -->
+        <mxCell id="e_d1_yes_o1" value="Да" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="d1" target="o1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_d1_no_o2" value="Нет" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="d1" target="o2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_d2_yes_o3" value="Да" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="d2" target="o3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_d2_no_o2" value="Нет" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="d2" target="o2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Consolidation to scoring + report + court -->
+        <mxCell id="e_o1_p9" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="o1" target="p9">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_o2_p9" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="o2" target="p9">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_o3_p9" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="o3" target="p9">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_p9_p10" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p9" target="p10">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_p10_end" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="p10" target="end">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Notes / legend -->
+        <mxCell id="note" value="Примечание:&#xa;1) Хэши подтверждают неизменность копии, но не «истину происхождения».&#xa;2) AI-детекторы дают вероятностный сигнал и должны интерпретироваться осторожно.&#xa;3) При отсутствии доверенного provenance опора на совокупность доказательств обязательна." style="shape=note;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="740" y="180" width="590" height="170" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

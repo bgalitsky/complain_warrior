@@ -188,9 +188,25 @@ def main():
             st.info("No complaints yet for this user.")
             st.stop()
 
-        complaint_ids = [c.complaint_id for c in complaints]
-        idx = complaint_ids.index(st.session_state.selected_complaint_id) if st.session_state.selected_complaint_id in complaint_ids else 0
-        cid = st.selectbox("Complaint", complaint_ids, index=idx)
+        complaint_labels = []
+        complaint_id_by_label = {}
+
+        for c in complaints:
+            title = getattr(c, "subject", "") or getattr(c, "title", "") or "Untitled complaint"
+            label = f"{c.complaint_id} — {title}"
+            complaint_labels.append(label)
+            complaint_id_by_label[label] = c.complaint_id
+
+        current_label = None
+        for label, complaint_id in complaint_id_by_label.items():
+            if complaint_id == st.session_state.selected_complaint_id:
+                current_label = label
+                break
+
+        idx = complaint_labels.index(current_label) if current_label in complaint_labels else 0
+        selected_label = st.selectbox("Complaint", complaint_labels, index=idx)
+
+        cid = complaint_id_by_label[selected_label]
         st.session_state.selected_complaint_id = cid
         cs = st.session_state.manager.get_complaint(cid)
 
