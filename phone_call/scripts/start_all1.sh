@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -u
 
-PUBLIC_BASE="https://foresakenly-figgiest-jazmin.ngrok-free.dev/"
+PUBLIC_BASE="https://foresakenly-figgiest-jazmin.ngrok-free.dev"
 CW_OAUTH_BASE_URL="${CW_OAUTH_BASE_URL:-}"
+
+ENTRY_FRONTEND_HOST="0.0.0.0"
+ENTRY_FRONTEND_PORT="8512"
 
 if [[ -z "$PUBLIC_BASE" && -n "$CW_OAUTH_BASE_URL" ]]; then
   PUBLIC_BASE="$CW_OAUTH_BASE_URL"
@@ -150,14 +153,39 @@ start_streamlit() {
   fi
 }
 
+NGROK_DOMAIN="foresakenly-figgiest-jazmin.ngrok-free.dev"
+
+start_entry_frontend() {
+  log "Starting entry frontend: entry_frontend.py on ${ENTRY_FRONTEND_HOST}:${ENTRY_FRONTEND_PORT}"
+  cd "$APP_DIR" || exit 1
+
+  export CW_PUBLIC_BASE_URL="https://foresakenly-figgiest-jazmin.ngrok-free.dev"
+  export CW_CUSTOMER_APP_URL="https://foresakenly-figgiest-jazmin.ngrok-free.dev"
+  export CW_COMPANY_APP_URL="https://foresakenly-figgiest-jazmin.ngrok-free.dev"
+
+  nohup python3 -m streamlit run "$APP_DIR/entry_frontend.py" \
+    --server.address "$ENTRY_FRONTEND_HOST" \
+    --server.port "$ENTRY_FRONTEND_PORT" \
+    >>"$LOG_DIR/entry_frontend.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/entry_frontend.pid"
+  sleep 3
+
+  if is_running_pid "$pid"; then
+    log "Entry frontend pid=$pid. Log: $LOG_DIR/entry_frontend.log"
+  else
+    log "Entry frontend failed to stay up. Check: $LOG_DIR/entry_frontend.log"
+  fi
+}
+
 start_ngrok() {
   log "Starting ngrok -> $NGROK_TARGET"
   cd "$APP_DIR" || exit 1
 
-  nohup ngrok http 80 >>"$LOG_DIR/ngrok.log" 2>&1 &
+  nohup ngrok http --domain="$NGROK_DOMAIN" 80 >>"$LOG_DIR/ngrok.log" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_DIR/ngrok.pid"
-  sleep 2
+  sleep 3
 
   if is_running_pid "$pid"; then
     log "ngrok pid=$pid. Log: $LOG_DIR/ngrok.log"
@@ -203,6 +231,7 @@ case "${1:-start}" in
     start_streamlit
     export PUBLIC_BASE="https://foresakenly-figgiest-jazmin.ngrok-free.dev/"
     start_ngrok
+    start_entry_frontend
     status_all
     ;;
   start)
@@ -213,6 +242,7 @@ case "${1:-start}" in
     start_oauth
     start_streamlit
     start_ngrok
+    start_entry_frontend
     status_all
     ;;
   status)

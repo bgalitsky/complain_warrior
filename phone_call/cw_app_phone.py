@@ -5,6 +5,7 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import List
+import time
 
 import streamlit as st
 
@@ -29,6 +30,18 @@ def _init_state():
     if "manager" not in st.session_state:
         st.session_state.manager = None
 
+def _selected_complaint_is_waiting_subscribed_flow() -> bool:
+    cid = st.session_state.get("selected_complaint_id")
+    mgr = st.session_state.get("manager")
+    if not cid or mgr is None:
+        return False
+    try:
+        cs = mgr.get_complaint(cid)
+        return (cs.current_status_summary or "").strip().lower() == \
+               "expecting the settlement from the company. wait for their response"
+    except Exception:
+        return False
+
 
 def _list_gmail_token_keys(db_path: str) -> List[str]:
     try:
@@ -46,6 +59,39 @@ def _list_gmail_token_keys(db_path: str) -> List[str]:
     except Exception:
         return []
 
+SUBSCRIPTION_DB = os.environ.get("CW_SUBSCRIPTIONS_DB", "cw_companies.sqlite")
+
+def _normalize_company_name(name: str) -> str:
+    return " ".join((name or "").strip().split())
+
+
+def _is_company_subscribed(company_name: str, db_path: str = SUBSCRIPTION_DB) -> bool:
+    company_name = _normalize_company_name(company_name)
+    if not company_name:
+        return False
+
+    con = sqlite3.connect(db_path)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS subscribed_companies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_name TEXT NOT NULL UNIQUE,
+            contact_name TEXT,
+            contact_email TEXT,
+            contact_phone TEXT,
+            subscription_tier TEXT DEFAULT 'standard',
+            notes TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
+    row = con.execute("""
+        SELECT is_active
+        FROM subscribed_companies
+        WHERE lower(company_name) = lower(?)
+    """, (company_name,)).fetchone()
+    con.close()
+    return bool(row and int(row[0]) == 1)
 
 def _ensure_manager():
     if "logs" not in st.session_state:
@@ -129,9 +175,13 @@ def main():
 
         if st.button("Run one automated step"):
             try:
-                st.session_state.manager.automated_step(trusted=st.session_state.trusted)
-                st.success("Automated step completed.")
-                st.rerun()
+                if _selected_complaint_is_waiting_subscribed_flow():
+                    st.info(
+                        "This complaint is waiting for company settlement response. No further automated action is taken.")
+                else:
+                    st.session_state.manager.automated_step(trusted=st.session_state.trusted)
+                    st.success("Automated step completed.")
+                    st.rerun()
             except Exception as e:
                 st.error(f"Automated step failed: {e}")
 
@@ -145,6 +195,7 @@ def main():
     with left:
         st.subheader("1) Initial demand")
         your_name = st.text_input("Your name", value="Boris Galitsky")
+        company_name = st.text_input("Company name", value="")
         subject = st.text_input("Subject", value="Complaint regarding missed connection and reimbursement")
         raw = st.text_area("Describe the complaint", height=180, value="My first flight was delayed, I missed my connection, and I had to pay for hotel and meals. I request reimbursement of those costs.")
 
@@ -152,6 +203,8 @@ def main():
         auto_policy = st.selectbox("Communication policy", list(AUTO_SEND_POLICIES), index=list(AUTO_SEND_POLICIES).index(policy_default))
         if st.button("Create complaint", type="primary"):
             try:
+                subscribed = _is_company_subscribed(company_name)
+
                 cs = st.session_state.manager.add_complaint(
                     subject=subject,
                     complaint_raw=raw,
@@ -159,10 +212,53 @@ def main():
                     user_name=your_name,
                     auto_send_policy=auto_policy,
                 )
+
                 st.session_state.selected_complaint_id = cs.complaint_id
-                st.session_state.selected_thread_id = next(iter(cs.threads.keys()))
-                st.success(f"Created complaint {cs.complaint_id}")
+                tid = next(iter(cs.threads.keys()))
+                st.session_state.selected_thread_id = tid
+
+                if subscribed:
+                    # Send only the first complaint email
+                    st.session_state.manager.draft_reply_now(cs.complaint_id, tid)
+                    st.session_state.manager.send_selected_drafts(cs.complaint_id, tid, [0], attachments=cs.docs)
+
+                    # Set current status summary and conclusion/state for subscribed companies
+                    cs.current_status_summary = "expecting the settlement from the company. Wait for their response"
+                    cs.final_conclusion = "Awaiting company response"
+
+                    # Optional: mark thread stage/status if those fields exist and are mutable
+                    try:
+                        ts = cs.threads[tid]
+                        ts.status = "awaiting_company_response"
+                        ts.stage = "waiting_for_settlement"
+                    except Exception:
+                        pass
+
+                    # Optional: log activity event if activities list is available
+                    try:
+                        cs.activities.append({
+                            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "channel": "system",
+                            "kind": "status",
+                            "title": "Subscribed company flow activated",
+                            "detail": "First complaint email sent. Waiting for settlement response from company.",
+                            "meta": {
+                                "company_name": company_name,
+                                "subscription_db": SUBSCRIPTION_DB,
+                            },
+                        })
+                    except Exception:
+                        pass
+
+                    st.success(
+                        f"Created complaint {cs.complaint_id}. "
+                        "Company is subscribed: first email sent, now waiting for response."
+                    )
+                else:
+                    st.success(f"Created complaint {cs.complaint_id}")
+
                 st.rerun()
+
             except Exception as e:
                 st.error(str(e))
 

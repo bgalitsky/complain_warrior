@@ -13,9 +13,14 @@ import streamlit as st
 APP_TITLE = "Complaint Warrior"
 DB_PATH = os.environ.get("CW_SUBSCRIPTIONS_DB", "cw_companies.sqlite")
 
-# Optional links to your existing apps
-CUSTOMER_APP_URL = os.environ.get("CW_CUSTOMER_APP_URL", "http://localhost:8501")
-COMPANY_APP_URL = os.environ.get("CW_COMPANY_APP_URL", "http://localhost:8501")
+
+BASE_PUBLIC_URL = os.environ.get(
+    "CW_PUBLIC_BASE_URL",
+    "https://foresakenly-figgiest-jazmin.ngrok-free.dev"
+).rstrip("/")
+
+CUSTOMER_APP_URL = os.environ.get("CW_CUSTOMER_APP_URL", BASE_PUBLIC_URL)
+COMPANY_APP_URL = os.environ.get("CW_COMPANY_APP_URL", BASE_PUBLIC_URL)
 LOGO_PATH = os.environ.get("CW_LOGO_PATH", "complaint_warrior.png")
 
 
