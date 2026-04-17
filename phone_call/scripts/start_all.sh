@@ -1,249 +1,287 @@
 #!/usr/bin/env bash
-# start_all.sh — start/stop/restart/status for Complaint Warrior stack (nohup)
-# Components:
-#  - nginx (port 80) reverse proxy
-#  - gmail_oauth_server.py (Flask) on 127.0.0.1:8510
-#  - Streamlit UI on 127.0.0.1:8509
-#  - ngrok tunnel to port 80 (optional) for PUBLIC_BASE
-#
-# DOES NOT change Gmail auth logic — it just starts your existing servers.
+set -u
 
-  export PUBLIC_BASE="https://foresakenly-figgiest-jazmin.ngrok-free.dev"
-  export CW_OAUTH_BASE_URL="https://foresakenly-figgiest-jazmin.ngrok-free.dev"
-  export GMAIL_TOKEN_DB="/home/ec2-user/phone_call/cw_gmail_tokens.sqlite"
-  export GOOGLE_CLIENT_SECRETS="/home/ec2-user/phone_call/credentials.json"
-  export FLASK_SECRET_KEY="some-long-random-string"
-  export CW_DB_PATH="/home/ec2-user/phone_call/cw_multiuser.sqlite"
+PUBLIC_BASE="${PUBLIC_BASE:-https://foresakenly-figgiest-jazmin.ngrok-free.dev}"
+CW_OAUTH_BASE_URL="${CW_OAUTH_BASE_URL:-}"
 
-set -euo pipefail
+ENTRY_FRONTEND_HOST="${ENTRY_FRONTEND_HOST:-0.0.0.0}"
+ENTRY_FRONTEND_PORT="${ENTRY_FRONTEND_PORT:-8512}"
 
-APP_DIR="${APP_DIR:-$HOME/phone_call}"
-STREAMLIT_PORT="${STREAMLIT_PORT:-8509}"
+SMALL_CLAIMS_HOST="${SMALL_CLAIMS_HOST:-0.0.0.0}"
+SMALL_CLAIMS_PORT="${SMALL_CLAIMS_PORT:-8513}"
+
+TWILIO_HOST="${TWILIO_HOST:-0.0.0.0}"
+TWILIO_PORT="${TWILIO_PORT:-5000}"
+
+OAUTH_HOST="${OAUTH_HOST:-127.0.0.1}"
 OAUTH_PORT="${OAUTH_PORT:-8510}"
-BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
-LOG_DIR="${LOG_DIR:-$APP_DIR/logs}"
-PID_DIR="${PID_DIR:-$APP_DIR/pids}"
 
-# Your files (adjust if you renamed them)
-STREAMLIT_FILE="${STREAMLIT_FILE:-cw_app_phone.py}"
-OAUTH_FILE="${OAUTH_FILE:-gmail_oauth_server.py}"
+STREAMLIT_HOST="${STREAMLIT_HOST:-127.0.0.1}"
+STREAMLIT_PORT="${STREAMLIT_PORT:-8509}"
 
-# ngrok (optional)
-ENABLE_NGROK="${ENABLE_NGROK:-1}"          # 1 or 0
-NGROK_BIN="${NGROK_BIN:-ngrok}"
-NGROK_URL="${NGROK_URL:-}"                # e.g. https://foresakenly-figgiest-jazmin.ngrok-free.dev  (preferred)
-NGROK_REGION="${NGROK_REGION:-us}"        # optional
-# If you don't have a reserved URL, leave NGROK_URL empty and the script will try to read the public URL from ngrok API.
+APP_DIR="${APP_DIR:-/home/ec2-user/phone_call1}"
+PID_DIR="$APP_DIR/pids"
+LOG_DIR="$APP_DIR/logs"
 
-mkdir -p "$LOG_DIR" "$PID_DIR"
+NGROK_TARGET="${NGROK_TARGET:-http://localhost:80}"
+NGROK_DOMAIN="${NGROK_DOMAIN:-foresakenly-figgiest-jazmin.ngrok-free.dev}"
 
-ts() { date +"%Y-%m-%d %H:%M:%S"; }
-log() { echo "[$(ts)] $*"; }
+if [[ -z "$PUBLIC_BASE" && -n "$CW_OAUTH_BASE_URL" ]]; then
+  PUBLIC_BASE="$CW_OAUTH_BASE_URL"
+fi
+PUBLIC_BASE="${PUBLIC_BASE%/}"
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { log "ERROR: missing command: $1"; exit 1; }
+mkdir -p "$PID_DIR" "$LOG_DIR"
+
+ts() {
+  date '+[%Y-%m-%d %H:%M:%S]'
 }
 
-is_running_pidfile() {
-  local pidfile="$1"
-  [[ -f "$pidfile" ]] || return 1
-  local pid; pid="$(cat "$pidfile" 2>/dev/null || true)"
-  [[ -n "${pid:-}" ]] || return 1
-  kill -0 "$pid" >/dev/null 2>&1
+log() {
+  echo "$(ts) $*"
 }
 
-kill_pidfile() {
-  local pidfile="$1"
-  if [[ -f "$pidfile" ]]; then
-    local pid; pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [[ -n "${pid:-}" ]] && kill -0 "$pid" >/dev/null 2>&1; then
-      log "Stopping PID $pid from $pidfile"
-      kill "$pid" >/dev/null 2>&1 || true
-      sleep 1
-      kill -9 "$pid" >/dev/null 2>&1 || true
-    fi
-    rm -f "$pidfile" || true
-  fi
+is_running_pid() {
+  local pid="$1"
+  [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-kill_by_pattern() {
-  local pat="$1"
-  local pids
-  pids="$(pgrep -f "$pat" || true)"
-  if [[ -n "$pids" ]]; then
-    log "Stopping by pattern: $pat  (pids: $pids)"
-    pkill -f "$pat" || true
+read_pid() {
+  local file="$1"
+  [[ -f "$file" ]] && cat "$file" 2>/dev/null || true
+}
+
+stop_pidfile() {
+  local name="$1"
+  local pidfile="$2"
+  local pid
+  pid="$(read_pid "$pidfile")"
+
+  if [[ -n "$pid" ]] && is_running_pid "$pid"; then
+    log "Stopping $name PID $pid from $pidfile"
+    kill "$pid" 2>/dev/null || true
     sleep 1
-    pkill -9 -f "$pat" || true
+    if is_running_pid "$pid"; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
   fi
+  rm -f "$pidfile"
+}
+
+stop_pattern() {
+  local label="$1"
+  local pattern="$2"
+  local pids
+
+  pids="$(pgrep -f "$pattern" || true)"
+  if [[ -n "$pids" ]]; then
+    log "Stopping by pattern: $label (pids: $pids)"
+    pkill -f "$pattern" 2>/dev/null || true
+    sleep 1
+    pkill -9 -f "$pattern" 2>/dev/null || true
+  fi
+}
+
+stop_all() {
+  log "Stopping all..."
+
+  stop_pidfile "ngrok" "$PID_DIR/ngrok.pid"
+  stop_pidfile "small_claims" "$PID_DIR/small_claims.pid"
+  stop_pidfile "entry_frontend" "$PID_DIR/entry_frontend.pid"
+  stop_pidfile "streamlit" "$PID_DIR/streamlit.pid"
+  stop_pidfile "oauth" "$PID_DIR/oauth.pid"
+  stop_pidfile "twilio" "$PID_DIR/twilio.pid"
+
+  stop_pattern "twilio app" "python3 $APP_DIR/app.py"
+  stop_pattern "oauth server" "python3 $APP_DIR/gmail_oauth_server.py"
+  stop_pattern "Complaint Warrior" "streamlit run $APP_DIR/cw_app_phone.py"
+  stop_pattern "Complaint Warrior" "python3 -m streamlit run $APP_DIR/cw_app_phone.py"
+  stop_pattern "entry frontend" "streamlit run $APP_DIR/entry_frontend.py"
+  stop_pattern "entry frontend" "python3 -m streamlit run $APP_DIR/entry_frontend.py"
+  stop_pattern "Small Claim Court Warrior" "streamlit run $APP_DIR/small_claim_court_warrior.py"
+  stop_pattern "Small Claim Court Warrior" "python3 -m streamlit run $APP_DIR/small_claim_court_warrior.py"
+  stop_pattern "ngrok" "ngrok http"
+
+  log "Done."
 }
 
 start_nginx() {
   log "Starting nginx..."
-  if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl start nginx || true
-    sudo systemctl status nginx --no-pager || true
+  sudo systemctl start nginx || true
+  sudo systemctl status nginx --no-pager || true
+}
+
+start_twilio() {
+  log "Starting Twilio webhook server: app.py on ${TWILIO_HOST}:${TWILIO_PORT}"
+  cd "$APP_DIR" || exit 1
+
+  nohup python3 "$APP_DIR/app.py" >>"$LOG_DIR/twilio.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/twilio.pid"
+  sleep 2
+
+  if is_running_pid "$pid"; then
+    log "Twilio webhook pid=$pid. Log: $LOG_DIR/twilio.log"
   else
-    sudo service nginx start || true
-    sudo service nginx status || true
+    log "Twilio failed to stay up. Check: $LOG_DIR/twilio.log"
   fi
 }
 
 start_oauth() {
-  need_cmd python3
-  cd "$APP_DIR"
+  log "Starting OAuth server: gmail_oauth_server.py on ${OAUTH_HOST}:${OAUTH_PORT}"
+  cd "$APP_DIR" || exit 1
 
-  local pidfile="$PID_DIR/oauth.pid"
-  if is_running_pidfile "$pidfile"; then
-    log "OAuth server already running (pid $(cat "$pidfile"))."
-    return 0
+  export PUBLIC_BASE="$PUBLIC_BASE"
+
+  nohup python3 "$APP_DIR/gmail_oauth_server.py" >>"$LOG_DIR/oauth.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/oauth.pid"
+  sleep 3
+
+  if ss -ltnp 2>/dev/null | grep -q "${OAUTH_HOST}:${OAUTH_PORT}"; then
+    log "OAuth is listening on ${OAUTH_HOST}:${OAUTH_PORT}. Log: $LOG_DIR/oauth.log"
+  else
+    log "OAuth failed to bind ${OAUTH_HOST}:${OAUTH_PORT}. Check: $LOG_DIR/oauth.log"
   fi
-
-  # Avoid "Address already in use"
-  kill_by_pattern "$OAUTH_FILE" || true
-
-  log "Starting OAuth server: $OAUTH_FILE on $BIND_ADDR:$OAUTH_PORT"
-  # Ensure OAuth runs on localhost (your nginx should proxy /auth/* and /oauth2callback to it)
-  nohup env \
-    OAUTH_BIND_ADDR="$BIND_ADDR" \
-    OAUTH_PORT="$OAUTH_PORT" \
-    python3 "$OAUTH_FILE" \
-    > "$LOG_DIR/oauth.log" 2>&1 &
-
-  echo $! > "$pidfile"
-  sleep 1
-  log "OAuth pid=$(cat "$pidfile"). Log: $LOG_DIR/oauth.log"
 }
 
-start_streamlit() {
-  need_cmd streamlit
-  cd "$APP_DIR"
+start_complaint_warrior() {
+  log "Starting Complaint Warrior: cw_app_phone.py on ${STREAMLIT_HOST}:${STREAMLIT_PORT}"
+  cd "$APP_DIR" || exit 1
 
-  local pidfile="$PID_DIR/streamlit.pid"
-  if is_running_pidfile "$pidfile"; then
-    log "Streamlit already running (pid $(cat "$pidfile"))."
-    return 0
-  fi
-
-  kill_by_pattern "streamlit run $STREAMLIT_FILE" || true
-
-  log "Starting Streamlit: $STREAMLIT_FILE on $BIND_ADDR:$STREAMLIT_PORT"
-  nohup streamlit run "$STREAMLIT_FILE" \
-    --server.address "$BIND_ADDR" \
+  nohup python3 -m streamlit run "$APP_DIR/cw_app_phone.py" \
+    --server.address "$STREAMLIT_HOST" \
     --server.port "$STREAMLIT_PORT" \
-    > "$LOG_DIR/streamlit.log" 2>&1 &
+    --server.baseUrlPath complaint_warrior \
+    >>"$LOG_DIR/streamlit.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/streamlit.pid"
+  sleep 3
 
-  echo $! > "$pidfile"
-  sleep 1
-  log "Streamlit pid=$(cat "$pidfile"). Log: $LOG_DIR/streamlit.log"
+  if is_running_pid "$pid"; then
+    log "Complaint Warrior pid=$pid. Log: $LOG_DIR/streamlit.log"
+  else
+    log "Complaint Warrior failed to stay up. Check: $LOG_DIR/streamlit.log"
+  fi
+}
+
+start_small_claims() {
+  log "Starting Small Claim Court Warrior: small_claim_court_warrior.py on ${SMALL_CLAIMS_HOST}:${SMALL_CLAIMS_PORT}"
+  cd "$APP_DIR" || exit 1
+
+  nohup python3 -m streamlit run "$APP_DIR/small_claim_court_warrior.py" \
+    --server.address "$SMALL_CLAIMS_HOST" \
+    --server.port "$SMALL_CLAIMS_PORT" \
+    --server.baseUrlPath small_claim_court_warrior \
+    >>"$LOG_DIR/small_claims.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/small_claims.pid"
+  sleep 3
+
+  if is_running_pid "$pid"; then
+    log "Small Claim Court Warrior pid=$pid. Log: $LOG_DIR/small_claims.log"
+  else
+    log "Small Claim Court Warrior failed to stay up. Check: $LOG_DIR/small_claims.log"
+  fi
+}
+
+start_entry_frontend() {
+  log "Starting entry frontend: entry_frontend.py on ${ENTRY_FRONTEND_HOST}:${ENTRY_FRONTEND_PORT}"
+  cd "$APP_DIR" || exit 1
+
+  export CW_PUBLIC_BASE_URL="$PUBLIC_BASE"
+  export CW_CUSTOMER_APP_URL="${CW_CUSTOMER_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
+  export CW_COMPANY_APP_URL="${CW_COMPANY_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
+  export CW_SMALL_CLAIMS_APP_URL="${CW_SMALL_CLAIMS_APP_URL:-${PUBLIC_BASE}/small_claim_court_warrior}"
+
+  nohup python3 -m streamlit run "$APP_DIR/entry_frontend.py" \
+    --server.address "$ENTRY_FRONTEND_HOST" \
+    --server.port "$ENTRY_FRONTEND_PORT" \
+    >>"$LOG_DIR/entry_frontend.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/entry_frontend.pid"
+  sleep 3
+
+  if is_running_pid "$pid"; then
+    log "Entry frontend pid=$pid. Log: $LOG_DIR/entry_frontend.log"
+    log "Chooser routes: / -> entry_frontend, /complaint_warrior -> cw_app_phone, /small_claim_court_warrior -> small_claim_court_warrior"
+  else
+    log "Entry frontend failed to stay up. Check: $LOG_DIR/entry_frontend.log"
+  fi
 }
 
 start_ngrok() {
-  if [[ "$ENABLE_NGROK" != "1" ]]; then
-    log "ngrok disabled (ENABLE_NGROK=0)."
-    return 0
-  fi
+  log "Starting ngrok -> $NGROK_TARGET"
+  cd "$APP_DIR" || exit 1
 
-  need_cmd "$NGROK_BIN"
+  nohup ngrok http --domain="$NGROK_DOMAIN" 80 >>"$LOG_DIR/ngrok.log" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_DIR/ngrok.pid"
+  sleep 3
 
-  local pidfile="$PID_DIR/ngrok.pid"
-  if is_running_pidfile "$pidfile"; then
-    log "ngrok already running (pid $(cat "$pidfile"))."
-    return 0
-  fi
-
-  kill_by_pattern "$NGROK_BIN http" || true
-
-  log "Starting ngrok -> http://localhost:80"
-  if [[ -n "$NGROK_URL" ]]; then
-    # new syntax: --url
-    nohup "$NGROK_BIN" http --region="$NGROK_REGION" --url="$NGROK_URL" 80 \
-      > "$LOG_DIR/ngrok.log" 2>&1 &
+  if is_running_pid "$pid"; then
+    log "ngrok pid=$pid. Log: $LOG_DIR/ngrok.log"
   else
-    # Let ngrok assign a URL
-    nohup "$NGROK_BIN" http --region="$NGROK_REGION" 80 \
-      > "$LOG_DIR/ngrok.log" 2>&1 &
-  fi
-  echo $! > "$pidfile"
-  sleep 2
-  log "ngrok pid=$(cat "$pidfile"). Log: $LOG_DIR/ngrok.log"
-
-  # Try to discover public URL and write PUBLIC_BASE for convenience
-  # (Your UI uses PUBLIC_BASE/auth/start — we are NOT changing auth; just helping you set env var.)
-  if command -v curl >/dev/null 2>&1; then
-    local tunnel_json
-    tunnel_json="$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null || true)"
-    if [[ -n "$tunnel_json" ]]; then
-      local pub
-      pub="$(python3 - <<'PY' 2>/dev/null || true
-import json,sys
-j=json.load(sys.stdin)
-t=j.get("tunnels") or []
-https=[x.get("public_url","") for x in t if x.get("public_url","").startswith("https://")]
-print(https[0] if https else (t[0].get("public_url","") if t else ""))
-PY
-<<<"$tunnel_json")"
-      if [[ -n "${pub:-}" ]]; then
-        log "Detected ngrok public URL: $pub"
-        echo "$pub" > "$APP_DIR/PUBLIC_BASE.txt"
-        log "Wrote $APP_DIR/PUBLIC_BASE.txt (export PUBLIC_BASE=\$(cat PUBLIC_BASE.txt) before starting Streamlit if needed)"
-      fi
-    fi
+    log "ngrok failed to stay up. Check: $LOG_DIR/ngrok.log"
   fi
 }
 
-status() {
+status_all() {
   log "=== STATUS ==="
-  if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl is-active nginx >/dev/null 2>&1 && log "nginx: active" || log "nginx: inactive"
+
+  if systemctl is-active --quiet nginx; then
+    log "nginx: active"
+  else
+    log "nginx: inactive"
   fi
 
-  for svc in oauth streamlit ngrok; do
-    local pidfile="$PID_DIR/$svc.pid"
-    if is_running_pidfile "$pidfile"; then
-      log "$svc: RUNNING (pid $(cat "$pidfile"))"
+  for svc in twilio oauth streamlit entry_frontend small_claims ngrok; do
+    pidfile="$PID_DIR/$svc.pid"
+    pid="$(read_pid "$pidfile")"
+    if [[ -n "$pid" ]] && is_running_pid "$pid"; then
+      log "$svc: RUNNING (pid $pid)"
     else
       log "$svc: NOT running"
     fi
   done
 
   log "Listening ports (best-effort):"
-  if command -v ss >/dev/null 2>&1; then
-    ss -lntp | egrep ":80|:$STREAMLIT_PORT|:$OAUTH_PORT" || true
-  elif command -v netstat >/dev/null 2>&1; then
-    netstat -lntp 2>/dev/null | egrep ":80|:$STREAMLIT_PORT|:$OAUTH_PORT" || true
-  fi
+  ss -ltnp 2>/dev/null | grep -E ':80 |:5000 |:8509 |:8510 |:8512 |:8513 ' || true
+  log "PUBLIC_BASE=$PUBLIC_BASE"
+  log "CW_CUSTOMER_APP_URL=${CW_CUSTOMER_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
+  log "CW_COMPANY_APP_URL=${CW_COMPANY_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
+  log "CW_SMALL_CLAIMS_APP_URL=${CW_SMALL_CLAIMS_APP_URL:-${PUBLIC_BASE}/small_claim_court_warrior}"
 }
 
-stop_all() {
-  log "Stopping all..."
-  kill_pidfile "$PID_DIR/ngrok.pid"
-  kill_pidfile "$PID_DIR/streamlit.pid"
-  kill_pidfile "$PID_DIR/oauth.pid"
-
-  # Fallback by pattern (in case pidfiles stale)
-  kill_by_pattern "streamlit run $STREAMLIT_FILE" || true
-  kill_by_pattern "$OAUTH_FILE" || true
-  kill_by_pattern "$NGROK_BIN http" || true
-
-  log "Done."
-}
-
-start_all() {
+start_stack() {
   log "Starting stack in $APP_DIR"
   start_nginx
+  start_twilio
   start_oauth
-  start_streamlit
+  start_complaint_warrior
+  start_small_claims
   start_ngrok
-  status
-  log "Logs: $LOG_DIR  |  PIDs: $PID_DIR"
+  start_entry_frontend
+  status_all
 }
 
-cmd="${1:-start}"
-case "$cmd" in
-  start)   start_all ;;
-  stop)    stop_all ;;
-  restart) stop_all; start_all ;;
-  status)  status ;;
-  *) echo "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
+case "${1:-start}" in
+  stop)
+    stop_all
+    ;;
+  restart)
+    stop_all
+    start_stack
+    ;;
+  start)
+    stop_all
+    start_stack
+    ;;
+  status)
+    status_all
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
 esac

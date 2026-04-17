@@ -182,10 +182,10 @@ class ComplaintCallAgent:
         business_address_hint = (business_address_hint or self._extract_business_address_hint(user_complaint) or "").strip()
 
         system = (
-            "You prepare automated customer-support phone calls. "
+            "You prepare automated call from customer to customer support or company representative. "
             "Return ONLY valid JSON matching the schema.\n\n"
             "Task:\n"
-            "1) Build a short spoken call script (max about 6 sentences) from the initial complaint and the current resolution state.\n"
+            "1) Build a short spoken call  script (of a customer to the company, max 6 sentences) from the initial complaint and the current resolution state.\n"
             "2) Identify the most likely business/vendor name.\n"
             "3) Infer or confirm the business address if possible.\n"
             "4) Provide the best support/customer-service phone numbers in E.164 format (+1...).\n"

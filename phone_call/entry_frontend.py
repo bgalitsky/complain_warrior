@@ -19,8 +19,18 @@ BASE_PUBLIC_URL = os.environ.get(
     "https://foresakenly-figgiest-jazmin.ngrok-free.dev"
 ).rstrip("/")
 
-CUSTOMER_APP_URL = os.environ.get("CW_CUSTOMER_APP_URL", BASE_PUBLIC_URL)
-COMPANY_APP_URL = os.environ.get("CW_COMPANY_APP_URL", BASE_PUBLIC_URL)
+CUSTOMER_APP_URL = os.environ.get(
+    "CW_CUSTOMER_APP_URL",
+    f"{BASE_PUBLIC_URL}/complaint_warrior"
+)
+COMPANY_APP_URL = os.environ.get(
+    "CW_COMPANY_APP_URL",
+    f"{BASE_PUBLIC_URL}/complaint_warrior"
+)
+SMALL_CLAIMS_APP_URL = os.environ.get(
+    "CW_SMALL_CLAIMS_APP_URL",
+    f"{BASE_PUBLIC_URL}/small_claim_court_warrior"
+)
 LOGO_PATH = os.environ.get("CW_LOGO_PATH", "complaint_warrior.png")
 
 
@@ -202,6 +212,15 @@ def render_home():
             st.session_state.entry_path = "company"
             st.rerun()
 
+    st.divider()
+    with st.container(border=True):
+        st.markdown("### Small Claim Court Warrior")
+        st.write(
+            "If Complaint Warrior has exhausted negotiation and escalation options, you can continue to "
+            "Small Claim Court Warrior to review complaints that are ready to proceed toward California small claims court."
+        )
+        st.markdown(f"[Open Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})")
+
 
 def render_customer_path():
     st.subheader("Customer path")
@@ -270,6 +289,10 @@ def render_customer_path():
 
         st.markdown(
             f"[Open Complaint Warrior customer workflow]({CUSTOMER_APP_URL})"
+        )
+        st.caption(
+            f"If Complaint Warrior has already exhausted its options for this case, continue in "
+            f"[Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})."
         )
 
     st.divider()
@@ -387,6 +410,7 @@ def main():
         st.write(f"Subscription DB: `{DB_PATH}`")
         st.markdown(f"[Customer workflow]({CUSTOMER_APP_URL})")
         st.markdown(f"[Company workflow]({COMPANY_APP_URL})")
+        st.markdown(f"[Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})")
 
     if st.session_state.entry_path is None:
         render_home()
