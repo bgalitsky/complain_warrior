@@ -32,6 +32,10 @@ SMALL_CLAIMS_APP_URL = os.environ.get(
     f"{BASE_PUBLIC_URL}/small_claim_court_warrior"
 )
 LOGO_PATH = os.environ.get("CW_LOGO_PATH", "complaint_warrior.png")
+FB_POSTER_DOWNLOAD_URL = os.environ.get(
+    "CW_FB_POSTER_DOWNLOAD_URL",
+    f"{BASE_PUBLIC_URL}/downloads/fb-poster/"
+)
 
 
 # -----------------------------
@@ -213,13 +217,26 @@ def render_home():
             st.rerun()
 
     st.divider()
-    with st.container(border=True):
-        st.markdown("### Small Claim Court Warrior")
-        st.write(
-            "If Complaint Warrior has exhausted negotiation and escalation options, you can continue to "
-            "Small Claim Court Warrior to review complaints that are ready to proceed toward California small claims court."
-        )
-        st.markdown(f"[Open Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})")
+    extra1, extra2 = st.columns(2, gap="large")
+
+    with extra1:
+        with st.container(border=True):
+            st.markdown("### Small Claim Court Warrior")
+            st.write(
+                "If Complaint Warrior has exhausted negotiation and escalation options, you can continue to "
+                "Small Claim Court Warrior to review complaints that are ready to proceed toward California small claims court."
+            )
+            st.markdown(f"[Open Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})")
+
+    with extra2:
+        with st.container(border=True):
+            st.markdown("### Facebook Business Poster")
+            st.write(
+                "Download the desktop companion app for locally assisted social outreach. "
+                "Use it from your own Windows machine with your local Chrome profile and complaint database."
+            )
+            st.markdown(f"[Open download page]({FB_POSTER_DOWNLOAD_URL})")
+            st.caption("Install the desktop app on the user machine. Keep the installer and the HTML download page in the same static downloads folder.")
 
 
 def render_customer_path():
@@ -411,6 +428,7 @@ def main():
         st.markdown(f"[Customer workflow]({CUSTOMER_APP_URL})")
         st.markdown(f"[Company workflow]({COMPANY_APP_URL})")
         st.markdown(f"[Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})")
+        st.markdown(f"[Facebook Business Poster download]({FB_POSTER_DOWNLOAD_URL})")
 
     if st.session_state.entry_path is None:
         render_home()

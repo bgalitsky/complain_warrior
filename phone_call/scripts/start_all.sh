@@ -193,6 +193,7 @@ start_entry_frontend() {
   export CW_CUSTOMER_APP_URL="${CW_CUSTOMER_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
   export CW_COMPANY_APP_URL="${CW_COMPANY_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
   export CW_SMALL_CLAIMS_APP_URL="${CW_SMALL_CLAIMS_APP_URL:-${PUBLIC_BASE}/small_claim_court_warrior}"
+  export CW_FB_POSTER_DOWNLOAD_URL="${CW_FB_POSTER_DOWNLOAD_URL:-${PUBLIC_BASE}/downloads/fb-poster/}"
 
   nohup python3 -m streamlit run "$APP_DIR/entry_frontend.py" \
     --server.address "$ENTRY_FRONTEND_HOST" \
@@ -204,7 +205,7 @@ start_entry_frontend() {
 
   if is_running_pid "$pid"; then
     log "Entry frontend pid=$pid. Log: $LOG_DIR/entry_frontend.log"
-    log "Chooser routes: / -> entry_frontend, /complaint_warrior -> cw_app_phone, /small_claim_court_warrior -> small_claim_court_warrior"
+    log "Chooser routes: / -> entry_frontend, /complaint_warrior -> cw_app_phone, /small_claim_court_warrior -> small_claim_court_warrior, /downloads/fb-poster/ -> desktop download"
   else
     log "Entry frontend failed to stay up. Check: $LOG_DIR/entry_frontend.log"
   fi
@@ -251,6 +252,7 @@ status_all() {
   log "CW_CUSTOMER_APP_URL=${CW_CUSTOMER_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
   log "CW_COMPANY_APP_URL=${CW_COMPANY_APP_URL:-${PUBLIC_BASE}/complaint_warrior}"
   log "CW_SMALL_CLAIMS_APP_URL=${CW_SMALL_CLAIMS_APP_URL:-${PUBLIC_BASE}/small_claim_court_warrior}"
+  log "CW_FB_POSTER_DOWNLOAD_URL=${CW_FB_POSTER_DOWNLOAD_URL:-${PUBLIC_BASE}/downloads/fb-poster/}"
 }
 
 start_stack() {

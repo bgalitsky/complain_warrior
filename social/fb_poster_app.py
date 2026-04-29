@@ -537,28 +537,10 @@ class FBPosterApp(tk.Tk):
                 except Exception as e:
                     self._log_msg(f"Review unavailable ({type(e).__name__}).", "warn")
 
-            # Option 2: Comment on latest post
+            # Option 2: Comment on latest post (discussion)
             if use["comment"] and not success and self._running:
                 self._log_msg("Option 2 — comment on latest post…", "step")
-                driver.get(page_url)
-                time.sleep(5)
-                try:
-                    comment_btn = wait.until(EC.element_to_be_clickable((By.XPATH,
-                        "//div[@aria-label='Leave a comment'] | "
-                        "//div[contains(@aria-label, 'Comment')]")))
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});", comment_btn)
-                    comment_btn.click()
-                    self._log_msg("Opened comment box.", "info")
-                    comment_box = wait.until(EC.presence_of_element_located((By.XPATH,
-                        "//div[@role='textbox' and "
-                        "contains(@aria-label,'Write a comment')]")))
-                    comment_box.send_keys(message)
-                    comment_box.send_keys(Keys.ENTER)
-                    self._log_msg("🏆  Comment posted!", "success")
-                    success = True
-                except Exception as e:
-                    self._log_msg(f"Comment unavailable ({type(e).__name__}).", "warn")
+                success = self._post_to_discussion(driver, business_name, message, page_url)
 
             # Option 3: Direct Message
             if use["dm"] and not success and self._running:
@@ -585,6 +567,86 @@ class FBPosterApp(tk.Tk):
             self._log_msg(f"Unexpected error: {e}", "error")
         finally:
             self._finish()
+
+    # ── Discussion / comment helper ───────────────────────────────────────────
+
+    def _post_to_discussion(self, driver, business_name, message, page_url) -> bool:
+        """
+        Navigate to the business page and comment on its latest post.
+        Tries two strategies:
+          A — find an already-visible textbox labelled 'comment'
+          B — click a Comment button, then type into the active element
+        Returns True on success.
+        """
+        wait = WebDriverWait(driver, 10)
+
+        # Navigate — try the broader search link first, fall back to known page_url
+        try:
+            self._log_msg("Searching for page via broad link detection…", "step")
+            query = urllib.parse.quote(business_name)
+            driver.get(f"https://www.facebook.com/search/top?q={query}")
+            xpath_link = (
+                "//a[contains(@href, '://facebook.com') and "
+                "(contains(@role, 'link') or contains(@role, 'presentation'))]"
+            )
+            first = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_link)))
+            found_url = first.get_attribute("href").split("?")[0]
+            self._log_msg(f"Navigating to: {found_url}", "info")
+            driver.get(found_url)
+            time.sleep(5)
+        except Exception as e:
+            self._log_msg(
+                f"Broad search failed ({type(e).__name__}), using known page URL.", "warn")
+            driver.get(page_url)
+            time.sleep(5)
+
+        # Scroll to reveal lazy-loaded posts
+        self._log_msg("Scrolling to find latest post…", "info")
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 600);")
+            time.sleep(2)
+
+        # Strategy A: directly visible comment textbox
+        try:
+            self._log_msg("Strategy A — hunting for comment textbox…", "step")
+            box_xpath = (
+                "//div[@role='textbox']"
+                "[contains(@aria-label, 'comment') or contains(@aria-label, 'ответить')]"
+            )
+            comment_box = wait.until(EC.element_to_be_clickable((By.XPATH, box_xpath)))
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", comment_box)
+            time.sleep(1)
+            comment_box.click()
+            comment_box.send_keys(message)
+            comment_box.send_keys(Keys.ENTER)
+            self._log_msg("🏆  Comment posted via Strategy A!", "success")
+            return True
+        except Exception as e:
+            self._log_msg(f"Strategy A failed ({type(e).__name__}).", "warn")
+
+        # Strategy B: click Comment button → type into active element
+        try:
+            self._log_msg("Strategy B — clicking Comment button…", "step")
+            btn_xpath = (
+                "//div[@aria-label='Leave a comment'] | "
+                "//span[text()='Comment' or text()='Комментировать']"
+            )
+            comment_btn = wait.until(EC.element_to_be_clickable((By.XPATH, btn_xpath)))
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", comment_btn)
+            time.sleep(1)
+            comment_btn.click()
+            time.sleep(2)
+            active_box = driver.switch_to.active_element
+            active_box.send_keys(message)
+            active_box.send_keys(Keys.ENTER)
+            self._log_msg("🏆  Comment posted via Strategy B!", "success")
+            return True
+        except Exception as e:
+            self._log_msg(f"Strategy B failed ({type(e).__name__}).", "warn")
+
+        return False
 
     # ── Selenium check ────────────────────────────────────────────────────────
 
