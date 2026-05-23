@@ -1,0 +1,75 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/27.0.5 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36" version="27.0.5">
+  <diagram id="complaint-warrior-architecture" name="Complaint Warrior Architecture">
+    <mxGraphModel dx="1941" dy="1350" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Complaint Warrior: Multi-Agent Consumer Rights Protection Architecture" style="text;html=1;fontSize=24;fontStyle=1;strokeColor=none;fillColor=none;align=center;" parent="1" vertex="1">
+          <mxGeometry x="350" y="20" width="900" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="consumerLayer" value="1. Consumer Interaction Layer&#xa;• Complaint Intake&#xa;• Chat / Voice / Email&#xa;• Customer Goals&#xa;• Evidence Upload" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="40" y="120" width="260" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="companyLayer" value="2. Company Interaction Layer&#xa;• Settlement Dashboard&#xa;• Negotiation Interface&#xa;• Subscription Mechanism&#xa;• Company AI Agents" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="1280" y="120" width="260" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="agentCore" value="3. Multi-Agent Reasoning Core&#xa;&#xa;• Negotiation Agent&#xa;• Legal Agent&#xa;• Banking Agent&#xa;• Social Escalation Agent&#xa;• Mediation Agent&#xa;• Planning / Orchestration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="500" y="280" width="580" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="sharedState" value="Shared Dispute-State Representation&#xa;&#xa;• Event Timeline&#xa;• Negotiation History&#xa;• Emotional State&#xa;• Legal/Evidential Status&#xa;• Escalation State" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="650" y="550" width="390" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="evidenceLayer" value="4. Evidence Management Layer&#xa;• Receipts&#xa;• Emails&#xa;• Screenshots&#xa;• Call Transcripts&#xa;• Structured Timelines" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="40" y="360" width="280" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="escalationLayer" value="5. Escalation and Enforcement Layer&#xa;• Chargeback Initiator&#xa;• Small Claim Warrior&#xa;• Social Media Escalation&#xa;• Regulatory Complaints" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="1220" y="360" width="320" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="behaviorLayer" value="6. Strategic Behavioral Prediction Layer&#xa;&#xa;LLM-Based Theory of Mind&#xa;• Compromise Likelihood&#xa;• Delay Strategy Prediction&#xa;• Reputation Sensitivity&#xa;• Escalation Thresholds" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="1120" y="620" width="270" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="humanLayer" value="7. Human Oversight Layer&#xa;• Approval of Critical Actions&#xa;• Settlement Review&#xa;• Ethical Control&#xa;• Legal Verification" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="210" y="780" width="580" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lifecycle" value="Dispute Lifecycle: Intake → Evidence Gathering → Strategic Analysis → Negotiation → Escalation → Settlement → Enforcement" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;align=center;" parent="1" vertex="1">
+          <mxGeometry x="250" y="930" width="1080" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="consumerLayer" target="agentCore" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="companyLayer" target="agentCore" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="evidenceLayer" target="agentCore" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="agentCore" target="sharedState" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="sharedState" target="behaviorLayer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="agentCore" target="escalationLayer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;dashed=1;endArrow=block;html=1;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="780" as="sourcePoint" />
+            <mxPoint x="740.0000000000005" y="520.0000000000002" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="450" y="540" />
+              <mxPoint x="740" y="540" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;dashed=1;endArrow=block;html=1;" parent="1" source="humanLayer" target="escalationLayer" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1500" y="840" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

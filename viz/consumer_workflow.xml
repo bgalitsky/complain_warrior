@@ -1,0 +1,62 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/27.0.5 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36" version="27.0.5">
+  <diagram id="consumer-workflow-diagram" name="Consumer Workflow">
+    <mxGraphModel dx="1699" dy="1181" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Complaint Warrior Consumer Workflow" style="text;html=1;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;align=center;" parent="1" vertex="1">
+          <mxGeometry x="450" y="20" width="700" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="input" value="Consumer Evidence Inputs&#xa;&#xa;• Transaction Details&#xa;• Receipts / Invoices&#xa;• Emails / Chats&#xa;• Screenshots&#xa;• Call Transcripts&#xa;• Photos&#xa;• Desired Outcomes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="60" y="140" width="280" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="intake" value="4.1 Complaint Intake&#xa;&#xa;LLM + Information Extraction&#xa;• Entity Recognition&#xa;• Timeline Extraction&#xa;• Contractual Obligations&#xa;• Contradiction Detection&#xa;• Monetary Claims" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="420" y="120" width="330" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="state" value="Persistent Dispute-State Representation&#xa;&#xa;• Structured Entities&#xa;• Event Graphs&#xa;• Evidence Links&#xa;• Negotiation History&#xa;• Emotional State" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="810" y="110" width="340" height="270" as="geometry" />
+        </mxCell>
+        <mxCell id="narrative" value="4.2 Narrative Reconstruction&#xa;&#xa;• Chronology Generation&#xa;• Legal–Strategic Narrative&#xa;• Evidence Alignment&#xa;• Contradiction Highlighting&#xa;• Dispute Archetype Detection" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="250" y="500" width="360" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="emotion" value="4.3 Emotional-State Modeling&#xa;&#xa;• Frustration Estimation&#xa;• Fatigue Detection&#xa;• Escalation Willingness&#xa;• Litigation Tolerance&#xa;• De-escalation Recommendation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="760" y="500" width="360" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="strategy" value="Strategic Consumer Advocacy Output&#xa;&#xa;• Negotiation Planning&#xa;• Escalation Guidance&#xa;• Chargeback Preparation&#xa;• Legal Workflow Support&#xa;• Settlement Optimization" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="470" y="830" width="430" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="input" target="intake" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="intake" target="state" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;exitX=0.19;exitY=0.904;exitDx=0;exitDy=0;exitPerimeter=0;" parent="1" source="state" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="880" y="270" as="sourcePoint" />
+            <mxPoint x="460" y="500" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="858" y="354" />
+              <mxPoint x="858" y="370" />
+              <mxPoint x="850" y="370" />
+              <mxPoint x="850" y="420" />
+              <mxPoint x="460" y="420" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;html=1;" parent="1" source="state" target="emotion" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="narrative" target="strategy" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="emotion" target="strategy" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="annotation" value="The workflow transforms fragmented consumer complaints into persistent structured dispute representations supporting strategic negotiation, emotional adaptation, escalation management, and legal enforcement." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="220" y="1070" width="940" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

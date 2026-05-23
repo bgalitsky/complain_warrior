@@ -1,0 +1,48 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/27.0.5 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36" version="27.0.5">
+  <diagram id="company-workflow" name="Company Workflow">
+    <mxGraphModel dx="1359" dy="945" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Complaint Warrior Company Workflow" style="text;html=1;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;align=center;" parent="1" vertex="1">
+          <mxGeometry x="420" y="20" width="760" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="subscription" value="5.1 Company Subscription Model&#xa;&#xa;• Structured Complaint Dashboards&#xa;• Escalation-Risk Scoring&#xa;• Reputation-Risk Estimation&#xa;• AI Settlement Recommendations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="70" y="160" width="340" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="agents" value="5.2 Company-Side AI Agents&#xa;&#xa;Analyze:&#xa;• Financial Liability&#xa;• Legal Exposure&#xa;• Public-Relations Risk&#xa;• Customer Sentiment&#xa;• Precedent Similarity" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="140" width="360" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="recommendations" value="Recommended Actions&#xa;&#xa;• Refunds&#xa;• Partial Compensation&#xa;• Service Credits&#xa;• Apologies&#xa;• Negotiated Settlements" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="1060" y="170" width="300" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="cooperative" value="5.3 Cooperative Negotiation Mode&#xa;&#xa;Shared Mediation Space&#xa;• Structured Offers&#xa;• Evidence Visibility&#xa;• Automated Compromise Exploration&#xa;• Policy-Grounded Settlements" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="430" y="460" width="560" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="outcomes" value="System Outcomes&#xa;&#xa;• Faster Resolution&#xa;• Reduced Litigation&#xa;• Lower Reputation Risk&#xa;• Improved Customer Satisfaction" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="70" y="460" width="330" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="subscription" target="agents" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="agents" target="recommendations" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;html=1;" parent="1" source="recommendations" target="cooperative" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1010" y="310" />
+              <mxPoint x="1010" y="650" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=4;endArrow=block;html=1;" parent="1" source="cooperative" target="outcomes" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="annotation" value="The company workflow transforms complaint handling from reactive customer support into AI-assisted strategic mediation and settlement optimization." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="300" y="1080" width="800" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
