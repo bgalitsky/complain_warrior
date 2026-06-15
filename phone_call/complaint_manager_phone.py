@@ -44,6 +44,26 @@ TEST_INBOX_EMAIL = "bgalitsky@hotmail.com"
 AUTO_SEND_POLICIES = ("manual", "draft_only", "auto_send")
 DEFAULT_AUTO_SEND_POLICY = "manual"
 
+# Complaint-wide resolution/escalation statuses updated by external modules
+# and/or by the main Streamlit UI. These keys are intentionally stable
+# because they are persisted in cw_store.sqlite.
+COMPLAINT_MODULE_STATUSES = {
+    "resolved": "Resolved",
+    "social_network_shared": "Social network shared",
+    "charge_back_initiated": "Charge-back initiated",
+    "submitted_to_small_claim_court": "Submitted to small claim court",
+    "escalated_to_authorities": "Escalated to authorities",
+}
+
+# These statuses pause ordinary negotiation/recommendation loops.
+# submitted_to_small_claim_court is terminal for app recommendations.
+# escalated_to_authorities pauses until an inbound reply is logged after escalation.
+ACTION_PAUSE_MODULE_STATUSES = {
+    "submitted_to_small_claim_court",
+    "escalated_to_authorities",
+}
+
+
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -184,6 +204,25 @@ def build_evidence_pack_pdf(out_pdf_path: str, complaint_id: str, files: List[st
     c.save()
 
 
+def _empty_module_statuses() -> Dict[str, Dict[str, Any]]:
+    return {
+        key: {"done": False, "label": label, "updated_at": None, "note": ""}
+        for key, label in COMPLAINT_MODULE_STATUSES.items()
+    }
+
+def _normalize_module_statuses(raw: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    statuses = _empty_module_statuses()
+    for key, value in (raw or {}).items():
+        if key not in statuses:
+            continue
+        if isinstance(value, dict):
+            statuses[key].update(value)
+            statuses[key]["label"] = COMPLAINT_MODULE_STATUSES[key]
+        else:
+            statuses[key]["done"] = bool(value)
+    return statuses
+
+
 @dataclass
 class ActivityEvent:
     ts: str
@@ -219,6 +258,7 @@ class ComplaintState:
     current_status_summary: str
     final_conclusion: str
     auto_send_policy: str
+    module_statuses: Dict[str, Dict[str, Any]]
     threads: Dict[str, ThreadState]
     activities: List[Dict[str, Any]]
 
@@ -237,6 +277,7 @@ class ComplaintState:
             "current_status_summary": self.current_status_summary,
             "final_conclusion": self.final_conclusion,
             "auto_send_policy": self.auto_send_policy,
+            "module_statuses": self.module_statuses,
             "threads": {k: asdict(v) for k, v in self.threads.items()},
             "activities": self.activities,
         }
@@ -258,6 +299,7 @@ class ComplaintState:
             current_status_summary=d.get("current_status_summary","Complaint created."),
             final_conclusion=d.get("final_conclusion",""),
             auto_send_policy=d.get("auto_send_policy", DEFAULT_AUTO_SEND_POLICY),
+            module_statuses=_normalize_module_statuses(d.get("module_statuses")),
             threads=threads,
             activities=d.get("activities") or [],
         )
@@ -355,6 +397,7 @@ class ComplaintWarriorManager:
             current_status_summary="Initial demand ready to draft.",
             final_conclusion="",
             auto_send_policy=auto_send_policy,
+            module_statuses=_empty_module_statuses(),
             threads={local_tid: ts},
             activities=[],
         )
@@ -369,6 +412,248 @@ class ComplaintWarriorManager:
         cs = self.complaints[complaint_id]
         cs.auto_send_policy = policy
         self._append_activity(cs, "system", "status", "Policy updated", f"Policy set to {policy}", {"policy": policy})
+
+
+    def set_module_status(self, complaint_id: str, status_key: str, done: bool = True, note: str = ""):
+        """Mark an external module milestone on the complaint.
+
+        Supported status_key values:
+        - resolved
+        - social_network_shared
+        - charge_back_initiated
+        - submitted_to_small_claim_court
+        - escalated_to_authorities
+        """
+        if status_key not in COMPLAINT_MODULE_STATUSES:
+            raise ValueError(f"Invalid module status: {status_key}")
+
+        cs = self.complaints[complaint_id]
+        cs.module_statuses = _normalize_module_statuses(getattr(cs, "module_statuses", None))
+        label = COMPLAINT_MODULE_STATUSES[status_key]
+        cs.module_statuses[status_key] = {
+            "done": bool(done),
+            "label": label,
+            "updated_at": now_ts(),
+            "note": note or "",
+        }
+
+        if done:
+            cs.current_status_summary = label
+            if status_key == "resolved":
+                cs.current_status_summary = "Company agreed to satisfy the demand. Complaint resolved."
+                cs.final_conclusion = note or "Complaint resolved."
+                # Resolved overrides all escalation recommendations. Keep historical
+                # module milestones, but stop all active threads and clear pending drafts.
+                for ts in cs.threads.values():
+                    ts.status = "closed"
+                    ts.stage = "resolved"
+                    ts.drafts = []
+                    ts.last_decision = None
+                if cs.strategy is None:
+                    cs.strategy = {}
+                cs.strategy["next_recommended_resolution_status"] = {
+                    "recommended_status": "resolved",
+                    "title": "Complaint resolved",
+                    "reason": note or "Company agreed to satisfy the customer demand.",
+                    "action": "No further action is recommended. Verify that the promised remedy is actually received.",
+                    "blocked": True,
+                }
+            elif status_key == "charge_back_initiated":
+                cs.final_conclusion = "Charge-back initiated; awaiting bank decision."
+            elif status_key == "submitted_to_small_claim_court":
+                cs.final_conclusion = "Submitted to small claim court; awaiting hearing or settlement."
+            elif status_key == "escalated_to_authorities":
+                cs.final_conclusion = "Escalated to authorities; awaiting agency response."
+            elif status_key == "social_network_shared":
+                cs.final_conclusion = "Public social-network escalation started."
+
+        self._append_activity(
+            cs,
+            "system",
+            "status",
+            label if done else f"{label} cleared",
+            note or (f"Complaint status updated: {label}" if done else f"Complaint status cleared: {label}"),
+            {"status_key": status_key, "done": bool(done)},
+        )
+        self._save(cs)
+        return cs.module_statuses[status_key]
+
+    def _latest_activity_ts_for_kind(self, cs: ComplaintState, *, kind: str = "received") -> str:
+        latest = ""
+        for ev in cs.activities or []:
+            if (ev.get("kind") or "").lower() == kind.lower():
+                latest = max(latest, ev.get("ts") or "")
+        return latest
+
+    def should_pause_actions(self, cs: ComplaintState) -> bool:
+        """Return True when ordinary recommendations/actions should pause.
+
+        Rules:
+        - submitted_to_small_claim_court: do not recommend or perform further actions.
+        - escalated_to_authorities: pause until a later inbound reply is recorded.
+        """
+        statuses = _normalize_module_statuses(getattr(cs, "module_statuses", None))
+
+        if statuses.get("resolved", {}).get("done"):
+            return True
+
+        if statuses.get("submitted_to_small_claim_court", {}).get("done"):
+            return True
+
+        esc = statuses.get("escalated_to_authorities", {})
+        if esc.get("done"):
+            escalated_at = esc.get("updated_at") or ""
+            latest_received = self._latest_activity_ts_for_kind(cs, kind="received")
+            # If a reply was received after escalation, the case can be reviewed again.
+            return not (latest_received and latest_received > escalated_at)
+
+        return False
+
+    def pause_reason(self, cs: ComplaintState) -> str:
+        statuses = _normalize_module_statuses(getattr(cs, "module_statuses", None))
+        if statuses.get("resolved", {}).get("done"):
+            return "Complaint resolved; no further Complaint Warrior action is recommended."
+        if statuses.get("submitted_to_small_claim_court", {}).get("done"):
+            return "Submitted to small claim court; no further Complaint Warrior action is recommended."
+        if statuses.get("escalated_to_authorities", {}).get("done") and self.should_pause_actions(cs):
+            return "Escalated to authorities; waiting for replies before further action is recommended."
+        return ""
+
+
+    def recommend_next_resolution_status(self, complaint_id: str, thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """Return a rule-based recommendation for the next resolution module.
+
+        This is intentionally conservative: it does not mark a module as complete.
+        It only tells the UI which module should be considered next.
+        """
+        cs = self.complaints[complaint_id]
+        statuses = _normalize_module_statuses(getattr(cs, "module_statuses", None))
+        status_text = " ".join([
+            cs.current_status_summary or "",
+            cs.final_conclusion or "",
+        ]).lower()
+
+        # Resolved always has the highest priority and overrides escalation.
+        if statuses.get("resolved", {}).get("done") or "resolved" in status_text or "satisfy the demand" in status_text:
+            return {
+                "recommended_status": "resolved",
+                "title": "Complaint resolved",
+                "reason": "The complaint appears resolved or the company appears to satisfy the demand.",
+                "action": "No further escalation is recommended. Verify that the promised refund, repair, or compensation was actually received.",
+                "blocked": True,
+            }
+
+        if statuses.get("submitted_to_small_claim_court", {}).get("done"):
+            return {
+                "recommended_status": "submitted_to_small_claim_court",
+                "title": "Wait for court process",
+                "reason": "The case has already been submitted to small claim court.",
+                "action": "Do not start additional automated escalation. Track hearing, service, settlement, or judgment events.",
+                "blocked": True,
+            }
+
+        if statuses.get("escalated_to_authorities", {}).get("done") and self.should_pause_actions(cs):
+            return {
+                "recommended_status": "escalated_to_authorities",
+                "title": "Wait for authority replies",
+                "reason": "The case was escalated to authorities and no later inbound reply has been logged yet.",
+                "action": "Do not recommend another action until an agency/company reply is received.",
+                "blocked": True,
+            }
+
+        # If a phone/email reply was just received, interpret current satisfaction state.
+        ts = cs.threads.get(thread_id) if thread_id else None
+        if ts is None and cs.threads:
+            ts = next(iter(cs.threads.values()))
+        satisfaction = getattr(ts, "satisfaction", None) or {}
+        verdict = (satisfaction.get("verdict") or "").lower() if isinstance(satisfaction, dict) else ""
+
+        if verdict == "resolved":
+            return {
+                "recommended_status": "resolved",
+                "title": "Confirm remedy and close",
+                "reason": "The latest reply was classified as satisfying the demand.",
+                "action": "Confirm receipt of refund/repair/compensation, then close the complaint.",
+                "blocked": True,
+            }
+
+        if verdict in {"unclear", "partial", "mixed"} or "review" in status_text or "clarifying" in status_text:
+            return {
+                "recommended_status": "negotiation",
+                "title": "Continue negotiation / clarify remedy",
+                "reason": "The latest reply does not clearly reject the demand but also does not fully resolve it.",
+                "action": "Draft a clarification message asking for a concrete remedy, amount, deadline, and confirmation number.",
+                "blocked": False,
+            }
+
+        # Escalation ladder after rejection/deadlock.
+        rejected_or_deadlock = any(x in status_text for x in [
+            "rejected", "did not accept", "denied", "refused", "deadlock", "no response", "unresolved", "failed"
+        ]) or verdict == "rejected"
+
+        if rejected_or_deadlock:
+            if not statuses.get("charge_back_initiated", {}).get("done"):
+                return {
+                    "recommended_status": "charge_back_initiated",
+                    "title": "Proceed to charge-back",
+                    "reason": "The merchant/company did not satisfy the demand. A payment dispute is usually the next practical escalation if the transaction was card-paid and still eligible.",
+                    "action": "Open Charge Back Initiator, prepare evidence, and mark charge-back initiated once submitted.",
+                    "blocked": False,
+                }
+            if not statuses.get("escalated_to_authorities", {}).get("done"):
+                return {
+                    "recommended_status": "escalated_to_authorities",
+                    "title": "Escalate to authorities",
+                    "reason": "The charge-back path has been initiated or is not enough, and the company has not resolved the complaint.",
+                    "action": "Submit regulatory/agency complaints and wait for replies before further actions.",
+                    "blocked": False,
+                }
+            if not statuses.get("social_network_shared", {}).get("done"):
+                return {
+                    "recommended_status": "social_network_shared",
+                    "title": "Share public complaint",
+                    "reason": "Private and regulatory channels have not produced a clear resolution.",
+                    "action": "Publish a factual, non-defamatory social-network post with evidence and desired remedy.",
+                    "blocked": False,
+                }
+            return {
+                "recommended_status": "submitted_to_small_claim_court",
+                "title": "Prepare small-claims filing",
+                "reason": "Negotiation and escalation steps appear exhausted.",
+                "action": "Open Small Claim Court Warrior and mark submitted only after the filing is actually submitted.",
+                "blocked": False,
+            }
+
+        # Default: keep negotiating.
+        return {
+            "recommended_status": "negotiation",
+            "title": "Continue normal complaint workflow",
+            "reason": "The case does not yet show a clear rejection, deadlock, or completed escalation milestone.",
+            "action": "Continue drafting/sending the next message or call the company before escalating.",
+            "blocked": False,
+        }
+
+    def update_after_iteration(self, complaint_id: str, thread_id: Optional[str] = None, detail: str = "") -> Dict[str, Any]:
+        """Recompute overall next-step recommendation and persist it as a status activity."""
+        cs = self.complaints[complaint_id]
+        rec = self.recommend_next_resolution_status(complaint_id, thread_id)
+        cs.strategy = cs.strategy or {}
+        cs.strategy["next_recommended_resolution_status"] = rec
+        self._append_activity(
+            cs,
+            "system",
+            "decision",
+            "Next resolution recommendation",
+            detail or rec.get("action") or rec.get("reason") or "",
+            {"thread_id": thread_id, "recommendation": rec},
+        )
+        self._save(cs)
+        return rec
+
+    def update_resolution_status(self, complaint_id: str, status: str, detail: str = "", meta: Optional[Dict[str, Any]] = None):
+        """Compatibility wrapper used by external modules."""
+        note = detail or ((meta or {}).get("detail") if isinstance(meta, dict) else "") or ""
+        return self.set_module_status(complaint_id, status, done=True, note=note)
 
     def attach_docs(self, complaint_id: str, paths: List[str]):
         cs = self.complaints[complaint_id]
@@ -408,6 +693,8 @@ class ComplaintWarriorManager:
 
     def draft_reply_now(self, complaint_id: str, thread_id: str):
         cs = self.complaints[complaint_id]
+        if self.should_pause_actions(cs):
+            raise RuntimeError(self.pause_reason(cs))
         ts = cs.threads[thread_id]
         strategy = ResolutionStrategy(**cs.strategy)
         self._ensure_gmail()
@@ -448,6 +735,8 @@ class ComplaintWarriorManager:
 
     def send_selected_drafts(self, complaint_id: str, thread_id: str, draft_indexes: List[int], attachments: Optional[List[str]] = None) -> List[dict]:
         cs = self.complaints[complaint_id]
+        if self.should_pause_actions(cs):
+            raise RuntimeError("Cannot send drafts while case is paused. " + self.pause_reason(cs))
         ts = cs.threads[thread_id]
         attachments = attachments or []
         sent = []
@@ -550,6 +839,21 @@ class ComplaintWarriorManager:
 
             cs.current_status_summary = "Company agreed to satisfy the demand. Complaint resolved."
             cs.final_conclusion = det.reason
+            cs.module_statuses = _normalize_module_statuses(getattr(cs, "module_statuses", None))
+            cs.module_statuses["resolved"] = {
+                "done": True,
+                "label": COMPLAINT_MODULE_STATUSES["resolved"],
+                "updated_at": now_ts(),
+                "note": det.reason or "Company agreed to satisfy the customer demand.",
+            }
+            cs.strategy = cs.strategy or {}
+            cs.strategy["next_recommended_resolution_status"] = {
+                "recommended_status": "resolved",
+                "title": "Complaint resolved",
+                "reason": det.reason or "Company agreed to satisfy the customer demand.",
+                "action": "No further action is recommended. Verify that the promised remedy is actually received.",
+                "blocked": True,
+            }
 
             self._append_activity(
                 cs,
@@ -584,6 +888,9 @@ class ComplaintWarriorManager:
     def poll_once(self, trusted: bool = False):
         self._require_user()
         for cid, cs in list(self.complaints.items()):
+            statuses_pause = _normalize_module_statuses(getattr(cs, "module_statuses", None))
+            if statuses_pause.get("submitted_to_small_claim_court", {}).get("done"):
+                continue
             for tid, ts in list(cs.threads.items()):
                 if tid.startswith("LOCAL-") or ts.status == "resolved":
                     continue
@@ -609,7 +916,11 @@ class ComplaintWarriorManager:
                     self._save(cs)
                     return
 
-                # Otherwise continue workflow
+                # Otherwise continue workflow unless the case remains paused.
+                if self.should_pause_actions(cs):
+                    self._save(cs)
+                    continue
+
                 self.draft_reply_now(cid, tid)
 
                 # Manual mode still drafts but does NOT auto-send
@@ -628,6 +939,9 @@ class ComplaintWarriorManager:
         """
         self._require_user()
         for cid, cs in list(self.complaints.items()):
+            if self.should_pause_actions(cs):
+                self._log(f"[manager] paused {cid}: {self.pause_reason(cs)}")
+                continue
             # seed any empty complaint with a first draft
             for tid, ts in list(cs.threads.items()):
                 if not ts.drafts and ts.status != "resolved":
@@ -639,6 +953,8 @@ class ComplaintWarriorManager:
 
     def place_phone_call_and_capture_reply(self, complaint_id: str, thread_id: str, timeout: int = 300) -> str:
         cs = self.complaints[complaint_id]
+        if self.should_pause_actions(cs):
+            raise RuntimeError("Cannot place phone call while case is paused. " + self.pause_reason(cs))
         ts = cs.threads[thread_id]
         if ComplaintCallAgent is None:
             raise RuntimeError("Phone module is not available (ComplaintCallAgent import failed).")
@@ -651,9 +967,47 @@ class ComplaintWarriorManager:
             complaint_stage=ts.stage,
             current_status_summary=cs.current_status_summary,
         )
+        reply = (reply or "").strip()
 
-        self.call_store.set(f"{complaint_id}:{thread_id}:{int(time.time())}", {"transcript": reply})
-        self._append_activity(cs, "phone", "received", "Phone call reply", reply[:2000], {"thread_id": thread_id})
+        self.call_store.set(
+            f"{complaint_id}:{thread_id}:{int(time.time())}",
+            {
+                "transcript": reply,
+                "thread_id": thread_id,
+                "complaint_id": complaint_id,
+                "created_at": now_ts(),
+            },
+        )
+
+        if not reply:
+            cs.current_status_summary = "Phone call completed, but no agent reply/transcript was captured."
+            self._append_activity(
+                cs,
+                "phone",
+                "received",
+                "Phone call completed without captured reply",
+                "The call was placed, but no inbound agent transcript was captured. Review Twilio logs or try again.",
+                {"thread_id": thread_id, "transcript_empty": True},
+            )
+            self.update_after_iteration(
+                complaint_id,
+                thread_id,
+                detail="Phone call produced no captured reply, so no escalation status was changed.",
+            )
+            self._save(cs)
+            return ""
+
+        # A phone transcript is an inbound reply. This also unpauses cases that were
+        # escalated_to_authorities and were waiting for a later reply.
+        self._append_activity(
+            cs,
+            "phone",
+            "received",
+            "Phone call reply",
+            reply[:2000],
+            {"thread_id": thread_id, "transcript_empty": False},
+        )
+
         resolved = self._apply_satisfaction(
             cs,
             ts,
@@ -662,10 +1016,29 @@ class ComplaintWarriorManager:
         )
 
         if resolved:
+            self.update_after_iteration(complaint_id, thread_id, detail="Phone reply resolved the complaint.")
             self._save(cs)
             return reply
 
-        self.draft_reply_now(complaint_id, thread_id)
+        rec = self.update_after_iteration(complaint_id, thread_id, detail="Phone reply processed; next resolution status recomputed.")
+
+        # Do not draft if the recomputed status says the case is paused/blocked.
+        if rec.get("blocked") or self.should_pause_actions(cs):
+            self._save(cs)
+            return reply
+
+        try:
+            self.draft_reply_now(complaint_id, thread_id)
+        except Exception as e:
+            self._append_activity(
+                cs,
+                "system",
+                "decision",
+                "Phone reply received, but follow-up draft failed",
+                str(e),
+                {"thread_id": thread_id},
+            )
+
         self._save(cs)
         return reply
 

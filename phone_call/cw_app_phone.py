@@ -10,7 +10,12 @@ import time
 import streamlit as st
 
 from text_processor import TextProcessing
-from complaint_manager_phone import ComplaintWarriorManager, AUTO_SEND_POLICIES, TEST_INBOX_EMAIL
+from complaint_manager_phone import (
+    ComplaintWarriorManager,
+    AUTO_SEND_POLICIES,
+    TEST_INBOX_EMAIL,
+    COMPLAINT_MODULE_STATUSES,
+)
 
 APP_TITLE = "Complaint Warrior"
 UPLOAD_DIR = Path("cw_uploads")
@@ -124,6 +129,65 @@ def _save_uploads(files) -> List[str]:
     return saved
 
 
+def _normalize_module_statuses(raw):
+    statuses = {
+        key: {"done": False, "label": label, "updated_at": None, "note": ""}
+        for key, label in COMPLAINT_MODULE_STATUSES.items()
+    }
+    for key, value in (raw or {}).items():
+        if key not in statuses:
+            continue
+        if isinstance(value, dict):
+            statuses[key].update(value)
+            statuses[key]["label"] = COMPLAINT_MODULE_STATUSES[key]
+        else:
+            statuses[key]["done"] = bool(value)
+    return statuses
+
+
+def _status_icon(done: bool) -> str:
+    return "✅" if done else "⬜"
+
+
+def _render_next_recommendation(manager, cid: str, tid: str):
+    """Show and optionally apply the manager's next resolution recommendation."""
+    try:
+        rec = manager.recommend_next_resolution_status(cid, tid)
+    except Exception as e:
+        st.warning(f"Could not compute recommendation: {e}")
+        return
+
+    title = rec.get("title") or "Next recommendation"
+    reason = rec.get("reason") or ""
+    action = rec.get("action") or ""
+    recommended_status = rec.get("recommended_status") or ""
+    blocked = bool(rec.get("blocked"))
+
+    if recommended_status == "resolved":
+        st.success(f"**Recommendation:** {title}\n\n{reason}\n\n**Action:** {action}")
+    elif blocked:
+        st.info(f"**Recommendation:** {title}\n\n{reason}\n\n**Action:** {action}")
+    else:
+        st.success(f"**Recommendation:** {title}\n\n{reason}\n\n**Action:** {action}")
+
+    if recommended_status in COMPLAINT_MODULE_STATUSES and not blocked:
+        if st.button(
+            f"Mark as: {COMPLAINT_MODULE_STATUSES[recommended_status]}",
+            key=f"apply_recommended_status_{cid}_{recommended_status}",
+        ):
+            try:
+                manager.set_module_status(
+                    cid,
+                    recommended_status,
+                    True,
+                    f"Applied from next-step recommendation: {title}",
+                )
+                st.success("Recommended module status applied.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
     _init_state()
@@ -201,8 +265,12 @@ def main():
     with left:
         st.subheader("1) Initial demand")
         st.markdown("### Quick Actions")
-        st.markdown("- [Charge Back Initiator](/charge_back_initiator/)")
-        st.markdown("- [CW Regulatory](/cw_regulatory/)")
+        st.markdown(f"- [Charge Back Initiator]({os.environ.get('CW_CHARGE_BACK_APP_URL', '/charge_back_initiator/')})")
+        st.markdown(f"- [CW Regulatory]({os.environ.get('CW_REGULATORY_APP_URL', '/cw_regulatory/')})")
+        st.markdown(f"- [Small Claim Court Warrior]({os.environ.get('CW_SMALL_CLAIMS_APP_URL', '/small_claim_court_warrior/')})")
+        social_url = os.environ.get("CW_SOCIAL_SHARE_URL", "")
+        if social_url:
+            st.markdown(f"- [Social Network Poster]({social_url})")
 
         your_name = st.text_input("Your name", value="Boris Galitsky")
         company_name = st.text_input("Company name", value="")
@@ -331,6 +399,35 @@ def main():
         with s3:
             st.caption("Conclusion")
             st.write(cs.final_conclusion or "Open")
+
+        st.markdown("#### Module resolution status")
+        module_statuses = _normalize_module_statuses(getattr(cs, "module_statuses", {}))
+        status_cols = st.columns(min(5, max(1, len(module_statuses))))
+        for idx, (status_key, status_info) in enumerate(module_statuses.items()):
+            with status_cols[idx % len(status_cols)]:
+                st.write(f"{_status_icon(status_info.get('done'))} {status_info.get('label')}")
+                if status_info.get("updated_at"):
+                    st.caption(status_info.get("updated_at"))
+
+        with st.expander("Update module status", expanded=False):
+            c_status, c_note = st.columns([1, 2])
+            with c_status:
+                status_choice = st.selectbox(
+                    "Status",
+                    list(COMPLAINT_MODULE_STATUSES.keys()),
+                    format_func=lambda k: COMPLAINT_MODULE_STATUSES[k],
+                )
+                status_done = st.checkbox("Completed", value=True)
+            with c_note:
+                status_note = st.text_input("Optional note", value="")
+                if st.button("Save module status"):
+                    try:
+                        st.session_state.manager.set_module_status(cid, status_choice, status_done, status_note)
+                        st.success("Module status updated.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
         with st.expander("Resolution strategy detail", expanded=True):
             st.write({
                 "primary_goal": cs.strategy.get("primary_goal"),
@@ -348,12 +445,20 @@ def main():
         ts = cs.threads[tid]
         st.caption(f"Thread label: {ts.label} | Stage: {ts.stage} | Status: {ts.status}")
 
+        pause_reason = st.session_state.manager.pause_reason(cs)
+        actions_paused = bool(pause_reason)
+        if actions_paused:
+            st.warning(pause_reason)
+
+        st.markdown("#### Overall check and next recommended action")
+        _render_next_recommendation(st.session_state.manager, cid, tid)
+
         # clear sequencing
         st.subheader("3) Negotiation step")
         b1, b2 = st.columns([1, 1])
 
         with b1:
-            if st.button("Draft next message", type="primary"):
+            if st.button("Draft next message", type="primary", disabled=actions_paused):
                 try:
                     st.session_state.manager.draft_reply_now(cid, tid)
                     st.success("Draft generated.")
@@ -371,7 +476,7 @@ def main():
                 st.text_area("Draft preview", value=drafts[selected_idx[0]].get("body", ""), height=220)
 
         with b2:
-            if st.button("Send selected drafts"):
+            if st.button("Send selected drafts", disabled=actions_paused):
                 try:
                     st.session_state.manager.send_selected_drafts(cid, tid, selected_idx or [0], attachments=cs.docs)
                     st.success("Sent.")
@@ -380,11 +485,14 @@ def main():
                     st.error(str(e))
 
         st.subheader("4) Phone contact")
-        if st.button("Call company now"):
+        if st.button("Call company now", disabled=actions_paused):
             try:
                 reply = st.session_state.manager.place_phone_call_and_capture_reply(cid, tid)
-                st.success("Phone reply captured.")
-                st.text_area("Phone reply", reply, height=180)
+                if reply and reply.strip():
+                    st.success("Phone reply captured and overall recommendation updated.")
+                    st.text_area("Phone reply", reply, height=180)
+                else:
+                    st.warning("Call completed, but no phone reply transcript was captured. Overall recommendation was not escalated.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Phone call failed: {e}")

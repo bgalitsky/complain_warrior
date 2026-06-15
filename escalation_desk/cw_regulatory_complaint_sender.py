@@ -486,6 +486,92 @@ def log_outreach(
         con.close()
 
 
+
+# -----------------------------------------------------------------------------
+# Complaint Warrior native status update helper
+# -----------------------------------------------------------------------------
+MODULE_STATUS_LABELS = {
+    "social_network_shared": "Social network shared",
+    "charge_back_initiated": "Charge-back initiated",
+    "submitted_to_small_claim_court": "Submitted to small claim court",
+    "escalated_to_authorities": "Escalated to authorities",
+}
+
+def update_native_complaint_module_status(
+    db_path: str,
+    complaint_id: str,
+    status_key: str,
+    note: str = "",
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Update Complaint Warrior native complaints.complaint_json.
+
+    This lets external modules update cw_store.sqlite without importing the
+    main Streamlit manager or requiring an active Streamlit session from
+    cw_app_phone.py.
+    """
+    if status_key not in MODULE_STATUS_LABELS or not db_path or not complaint_id:
+        return False
+    if not os.path.exists(db_path):
+        return False
+
+    label = MODULE_STATUS_LABELS[status_key]
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(db_path)
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info('complaints')").fetchall()]
+        if "complaint_id" not in cols or "complaint_json" not in cols:
+            return False
+        row = con.execute(
+            "SELECT complaint_json FROM complaints WHERE complaint_id=? LIMIT 1",
+            (complaint_id,),
+        ).fetchone()
+        if not row:
+            return False
+        obj = json_loads_safe(row[0])
+        statuses = obj.get("module_statuses")
+        if not isinstance(statuses, dict):
+            statuses = {}
+        for key, key_label in MODULE_STATUS_LABELS.items():
+            statuses.setdefault(key, {"done": False, "label": key_label, "updated_at": None, "note": ""})
+            statuses[key]["label"] = key_label
+        statuses[status_key].update({
+            "done": True,
+            "label": label,
+            "updated_at": now_iso,
+            "note": note or "",
+        })
+        obj["module_statuses"] = statuses
+        obj["current_status_summary"] = label
+        if status_key == "escalated_to_authorities":
+            obj["final_conclusion"] = "Escalated to authorities; awaiting agency response."
+            for thread in (obj.get("threads") or {}).values():
+                if isinstance(thread, dict):
+                    thread["status"] = "waiting_external_reply"
+                    thread["stage"] = "escalated_to_authorities"
+                    thread["drafts"] = []
+                    thread["last_decision"] = None
+        activities = obj.get("activities")
+        if not isinstance(activities, list):
+            activities = []
+        activities.append({
+            "ts": now_iso,
+            "channel": "regulatory",
+            "kind": "status",
+            "title": label,
+            "detail": note or "Regulatory escalation submitted or recorded.",
+            "meta": {"status_key": status_key, **(meta or {})},
+        })
+        obj["activities"] = activities
+        con.execute(
+            "UPDATE complaints SET complaint_json=?, updated_at=? WHERE complaint_id=?",
+            (json.dumps(obj, ensure_ascii=False), time.time(), complaint_id),
+        )
+        con.commit()
+        return True
+    finally:
+        con.close()
+
 # -----------------------------------------------------------------------------
 # OpenAI routing and drafting
 # -----------------------------------------------------------------------------
@@ -1399,6 +1485,16 @@ def main() -> None:
                         hint = " Reconnect Gmail: the saved refresh token was revoked/expired. Delete cw_gmail_tokens.sqlite/gmail_token.json/token.pickle or rerun the OAuth server, then send again."
                     log_outreach(st.session_state.loaded_db_path, record.complaint_id, draft, "failed", error=str(e))
                     st.error(f"Failed sending to {draft.org_name}: {e}{hint}")
+            if sent > 0:
+                status_updated = update_native_complaint_module_status(
+                    st.session_state.loaded_db_path,
+                    record.complaint_id,
+                    "escalated_to_authorities",
+                    note=f"Regulatory/authority outreach sent to {sent} organization(s); failures={failures}.",
+                    meta={"sent": sent, "failures": failures},
+                )
+                if status_updated:
+                    st.success("Complaint Warrior status updated: escalated to authorities.")
             st.info(f"Done. Sent={sent}, failed={failures}.")
 
     st.subheader("5) Copy/paste package for web forms")
@@ -1415,6 +1511,19 @@ def main() -> None:
         file_name=f"complaint_outreach_{record.complaint_id}.md",
         mime="text/markdown",
     )
+
+    if web_only and st.button("Mark selected web/manual submissions as completed"):
+        status_updated = update_native_complaint_module_status(
+            st.session_state.loaded_db_path,
+            record.complaint_id,
+            "escalated_to_authorities",
+            note=f"User marked {len(web_only)} web/manual regulatory submission(s) as completed.",
+            meta={"web_manual_count": len(web_only)},
+        )
+        if status_updated:
+            st.success("Complaint Warrior status updated: escalated to authorities.")
+        else:
+            st.warning("Could not update the native Complaint Warrior status. The outreach package is still available for download.")
 
 
 if __name__ == "__main__":

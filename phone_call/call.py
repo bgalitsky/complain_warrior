@@ -362,7 +362,20 @@ class ComplaintCallAgent:
     def _fetch_result(self, call_sid: str) -> Dict[str, Any]:
         url = f"{self.base}/result/{call_sid}"
         with urlopen(url, timeout=15) as r:
-            return json.loads(r.read().decode("utf-8"))
+            raw = r.read().decode("utf-8", errors="replace").strip()
+
+        if not raw:
+            return {"transcript": "", "status": "empty_result", "call_sid": call_sid}
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "transcript": "",
+                "status": "non_json_result",
+                "call_sid": call_sid,
+                "raw_preview": raw[:500],
+            }
 
     def wait_for_transcript(self, call_sid: str, overall_timeout: int = 300, idle_after_inbound: int = 6) -> str:
         """
@@ -376,7 +389,7 @@ class ComplaintCallAgent:
             try:
                 data = self._fetch_result(call_sid)
                 tr = data.get("transcript", "") or ""
-            except (HTTPError, URLError, TimeoutError):
+            except (HTTPError, URLError, TimeoutError,  json.JSONDecodeError, ValueError):
                 time.sleep(1)
                 continue
 
