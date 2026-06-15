@@ -140,10 +140,16 @@ def main():
 
     # Sidebar: unchanged Gmail auth entry point
     PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "").rstrip("/")
+    AUTH_GUIDE_URL = os.environ.get(
+        "CW_AUTH_GUIDE_URL",
+        f"{PUBLIC_BASE}/downloads/Gmail%20Authentication.pdf"
+    )
     with st.sidebar:
         st.header("Gmail")
         if PUBLIC_BASE:
             st.markdown(f"[Connect Gmail]({PUBLIC_BASE}/auth/start)")
+            st.caption("First time setup")
+            st.markdown(f"📄 [Gmail Authentication Instructions (PDF)]({AUTH_GUIDE_URL})")
         else:
             st.warning("PUBLIC_BASE is not set (e.g. your ngrok URL). Set it so the Connect button can work.")
 
@@ -194,6 +200,10 @@ def main():
 
     with left:
         st.subheader("1) Initial demand")
+        st.markdown("### Quick Actions")
+        st.markdown("- [Charge Back Initiator](/charge_back_initiator/)")
+        st.markdown("- [CW Regulatory](/cw_regulatory/)")
+
         your_name = st.text_input("Your name", value="Boris Galitsky")
         company_name = st.text_input("Company name", value="")
         subject = st.text_input("Subject", value="Complaint regarding missed connection and reimbursement")

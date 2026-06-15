@@ -36,6 +36,14 @@ FB_POSTER_DOWNLOAD_URL = os.environ.get(
     "CW_FB_POSTER_DOWNLOAD_URL",
     f"{BASE_PUBLIC_URL}/downloads/fb-poster/"
 )
+CHARGE_BACK_INITIATOR_URL = os.environ.get(
+    "CW_CHARGE_BACK_INITIATOR_URL",
+    f"{BASE_PUBLIC_URL}/charge_back_initiator/"
+)
+CW_REGULATORY_URL = os.environ.get(
+    "CW_REGULATORY_URL",
+    f"{BASE_PUBLIC_URL}/cw_regulatory"
+)
 
 
 # -----------------------------
@@ -215,6 +223,27 @@ def render_home():
         if st.button("I represent a company", use_container_width=True):
             st.session_state.entry_path = "company"
             st.rerun()
+
+    st.divider()
+
+    st.markdown("### Additional tools")
+    tool1, tool2 = st.columns(2, gap="large")
+
+    with tool1:
+        with st.container(border=True):
+            st.markdown("### Charge Back Initiator")
+            st.write(
+                "Start a credit-card chargeback workflow for complaints where the customer may dispute a transaction."
+            )
+            st.markdown(f"[Open Charge Back Initiator]({CHARGE_BACK_INITIATOR_URL})")
+
+    with tool2:
+        with st.container(border=True):
+            st.markdown("### CW Regulatory")
+            st.write(
+                "Open the regulatory complaint workflow for escalation to public agencies and consumer-protection channels."
+            )
+            st.markdown(f"[Open CW Regulatory]({CW_REGULATORY_URL})")
 
     st.divider()
     extra1, extra2 = st.columns(2, gap="large")
@@ -428,6 +457,8 @@ def main():
         st.markdown(f"[Customer workflow]({CUSTOMER_APP_URL})")
         st.markdown(f"[Company workflow]({COMPANY_APP_URL})")
         st.markdown(f"[Small Claim Court Warrior]({SMALL_CLAIMS_APP_URL})")
+        st.markdown(f"[Charge Back Initiator]({CHARGE_BACK_INITIATOR_URL})")
+        st.markdown(f"[CW Regulatory]({CW_REGULATORY_URL})")
         st.markdown(f"[Facebook Business Poster download]({FB_POSTER_DOWNLOAD_URL})")
 
     if st.session_state.entry_path is None:
