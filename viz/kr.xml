@@ -1,0 +1,39 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/27.0.5 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36" version="27.0.5">
+  <diagram name="KnowledgeRepresentation" id="0">
+    <mxGraphModel dx="1359" dy="945" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Complaint Warrior Knowledge Representation" style="text;html=1;fontSize=24;fontStyle=1;strokeColor=none;fillColor=none;" parent="1" vertex="1">
+          <mxGeometry x="420" y="20" width="760" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ontology" value="Structured Dispute Ontology&#xa;&#xa;• Transactions&#xa;• Obligations&#xa;• Evidence&#xa;• Policies&#xa;• Legal Claims&#xa;• Emotional States&#xa;• Negotiation Actions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="30" y="70" width="360" height="320" as="geometry" />
+        </mxCell>
+        <mxCell id="graph" value="Temporal Event Graph&#xa;&#xa;Purchase → Failure → Complaint → Denial → Escalation → Settlement&#xa;&#xa;Temporal &amp; Causal Relations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="770" y="380" width="420" height="290" as="geometry" />
+        </mxCell>
+        <mxCell id="semantic" value="Unified Semantic Representation&#xa;&#xa;• Structured Facts&#xa;• Contradiction Detection&#xa;• Evidential Support&#xa;• State Evolution&#xa;• Negotiation Reasoning" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="520" y="70" width="420" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="reasoning" value="Reasoning Agents&#xa;&#xa;Negotiation • Legal • Banking • Emotional Modeling • Escalation Planning" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+          <mxGeometry x="30" y="490" width="600" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;" parent="1" source="ontology" target="semantic" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;" parent="1" source="graph" target="semantic" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=4;endArrow=block;" parent="1" source="semantic" target="reasoning" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="654" y="400" />
+              <mxPoint x="330" y="400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
