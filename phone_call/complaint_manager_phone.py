@@ -9,7 +9,7 @@ import base64
 import sqlite3
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -41,8 +41,44 @@ SCOPES = [
 
 LABEL_PROCESSED = "CW_PROCESSED"
 TEST_INBOX_EMAIL = "bgalitsky@hotmail.com"
+
+# Deployment safety:
+# - In production directory /home/ec2-user/prod, real company/business emails are used.
+# - In any other directory, outbound complaint emails are redirected to TEST_INBOX_EMAIL.
+# You can override with CW_DEPLOY_ENV=prod or CW_FORCE_TEST_INBOX=1.
+PROD_DIR_NAME = os.environ.get("CW_PROD_DIR_NAME", "prod")
+FORCE_TEST_INBOX = os.environ.get("CW_FORCE_TEST_INBOX", "").strip().lower() in {"1", "true", "yes", "on"}
+
 AUTO_SEND_POLICIES = ("manual", "draft_only", "auto_send")
 DEFAULT_AUTO_SEND_POLICY = "manual"
+
+def is_production_deployment() -> bool:
+    """Return True only when running in the production deployment.
+
+    Default production detection is intentionally strict: the process must run
+    from a directory named "prod" or CW_DEPLOY_ENV must be set to "prod".
+    """
+    if FORCE_TEST_INBOX:
+        return False
+    env = os.environ.get("CW_DEPLOY_ENV", "").strip().lower()
+    if env == "prod":
+        return True
+    if env in {"dev", "development", "test", "debug"}:
+        return False
+    cwd_name = os.path.basename(os.path.abspath(os.getcwd()))
+    file_dir_name = os.path.basename(os.path.abspath(os.path.dirname(__file__)))
+    return cwd_name == PROD_DIR_NAME or file_dir_name == PROD_DIR_NAME
+
+
+def extract_first_email(text: str) -> str:
+    """Extract the first email address from free text."""
+    m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or "")
+    return m.group(0).strip().lower() if m else ""
+
+
+def outbound_email_mode_label() -> str:
+    return "PRODUCTION: sends to extracted business email" if is_production_deployment() else f"DEBUG: redirects to {TEST_INBOX_EMAIL}"
+
 
 # Complaint-wide resolution/escalation statuses updated by external modules
 # and/or by the main Streamlit UI. These keys are intentionally stable
@@ -64,6 +100,25 @@ ACTION_PAUSE_MODULE_STATUSES = {
 }
 
 
+
+
+
+def _resolution_strategy_from_dict(raw: Optional[Dict[str, Any]]) -> ResolutionStrategy:
+    """Build ResolutionStrategy while ignoring UI-only/runtime keys.
+
+    ComplaintState.strategy is also used to persist recommendation metadata such as
+    next_recommended_resolution_status. ResolutionStrategy does not accept those
+    extra keys, so passing the whole dict causes:
+        __init__() got an unexpected keyword argument 'next_recommended_resolution_status'
+    """
+    raw = raw or {}
+    allowed = {
+        "primary_goal": raw.get("primary_goal") or "general resolution",
+        "acceptable_fallbacks": raw.get("acceptable_fallbacks") or [],
+        "escalate_if": raw.get("escalate_if") or [],
+        "evidence_needed": raw.get("evidence_needed") or [],
+    }
+    return ResolutionStrategy(**allowed)
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -251,6 +306,8 @@ class ComplaintState:
     complaint_professional: str
     user_email: str
     user_name: str
+    company_name: str
+    company_email: str
     created_at: str
     docs: List[str]
     evidence_pack_pdf: Optional[str]
@@ -270,6 +327,8 @@ class ComplaintState:
             "complaint_professional": self.complaint_professional,
             "user_email": self.user_email,
             "user_name": self.user_name,
+            "company_name": self.company_name,
+            "company_email": self.company_email,
             "created_at": self.created_at,
             "docs": self.docs,
             "evidence_pack_pdf": self.evidence_pack_pdf,
@@ -292,6 +351,8 @@ class ComplaintState:
             complaint_professional=d.get("complaint_professional",""),
             user_email=d.get("user_email",""),
             user_name=d.get("user_name",""),
+            company_name=d.get("company_name",""),
+            company_email=d.get("company_email",""),
             created_at=d.get("created_at", now_ts()),
             docs=d.get("docs") or [],
             evidence_pack_pdf=d.get("evidence_pack_pdf"),
@@ -374,7 +435,7 @@ class ComplaintWarriorManager:
     def get_complaint(self, complaint_id: str) -> ComplaintState:
         return self.complaints[complaint_id]
 
-    def add_complaint(self, subject: str, complaint_raw: str, user_email: str, user_name: str, auto_send_policy: str = DEFAULT_AUTO_SEND_POLICY) -> ComplaintState:
+    def add_complaint(self, subject: str, complaint_raw: str, user_email: str, user_name: str, auto_send_policy: str = DEFAULT_AUTO_SEND_POLICY, company_name: str = "", company_email: str = "") -> ComplaintState:
         self._require_user()
         cid = f"CMP-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         prof = self.tp.rewrite_complaint_professional(complaint_raw, log_cb=self.log_cb)
@@ -390,6 +451,8 @@ class ComplaintWarriorManager:
             complaint_professional=prof,
             user_email=user_email,
             user_name=user_name,
+            company_name=(company_name or "").strip(),
+            company_email=(company_email or extract_first_email(complaint_raw) or "").strip().lower(),
             created_at=now_ts(),
             docs=[],
             evidence_pack_pdf=None,
@@ -696,7 +759,7 @@ class ComplaintWarriorManager:
         if self.should_pause_actions(cs):
             raise RuntimeError(self.pause_reason(cs))
         ts = cs.threads[thread_id]
-        strategy = ResolutionStrategy(**cs.strategy)
+        strategy = _resolution_strategy_from_dict(cs.strategy)
         self._ensure_gmail()
         combined = self._combine_transcript(cs, thread_id)
         user_data = {
@@ -733,6 +796,82 @@ class ComplaintWarriorManager:
         )
         self._save(cs)
 
+    def _extract_business_email_for_draft(self, cs: ComplaintState, draft: Optional[Dict[str, str]] = None) -> str:
+        """Find the real business recipient email for production sends.
+
+        Priority:
+        1) explicit company_email field saved with the complaint
+        2) email inside the draft's to_hint/body/subject
+        3) email in complaint subject/raw/professional text
+        """
+        draft = draft or {}
+        sources = [
+            getattr(cs, "company_email", "") or "",
+            draft.get("to_hint", "") or "",
+            draft.get("body", "") or "",
+            draft.get("subject", "") or "",
+            getattr(cs, "subject", "") or "",
+            getattr(cs, "complaint_raw", "") or "",
+            getattr(cs, "complaint_professional", "") or "",
+        ]
+        for source in sources:
+            email = extract_first_email(source)
+            if email:
+                return email
+        return ""
+
+    def _resolve_outbound_recipient(self, cs: ComplaintState, draft: Dict[str, str]) -> tuple[str, Dict[str, Any]]:
+        """Return recipient email and routing metadata for safe deployment."""
+        intended = self._extract_business_email_for_draft(cs, draft)
+        prod = is_production_deployment()
+        if prod:
+            if not intended:
+                raise RuntimeError(
+                    "Production mode requires a real business/company email. "
+                    "Enter Company email on the Complaint Warrior form or include it in the complaint text."
+                )
+            return intended, {
+                "deployment_mode": "prod",
+                "recipient_source": "company_email_or_complaint_text",
+                "intended_recipient": intended,
+                "actual_recipient": intended,
+                "test_redirect": False,
+            }
+
+        return TEST_INBOX_EMAIL, {
+            "deployment_mode": "debug",
+            "recipient_source": "debug_test_inbox",
+            "intended_recipient": intended,
+            "actual_recipient": TEST_INBOX_EMAIL,
+            "test_redirect": True,
+        }
+
+
+
+    def get_outbound_recipient_preview(self, complaint_id: str, thread_id: str, draft_index: int = 0) -> Dict[str, Any]:
+        """Return visible recipient routing info before sending.
+
+        In prod this returns the real company/business email.
+        In debug/dev this returns TEST_INBOX_EMAIL as actual recipient and the
+        business email, if found, as intended recipient.
+        """
+        cs = self.complaints[complaint_id]
+        ts = cs.threads[thread_id]
+        drafts = ts.drafts or []
+        draft = drafts[draft_index] if 0 <= draft_index < len(drafts) else {}
+        try:
+            _recipient, meta = self._resolve_outbound_recipient(cs, draft)
+            return meta
+        except Exception as e:
+            return {
+                "deployment_mode": "prod" if is_production_deployment() else "debug",
+                "recipient_source": "error",
+                "intended_recipient": self._extract_business_email_for_draft(cs, draft),
+                "actual_recipient": "",
+                "test_redirect": not is_production_deployment(),
+                "error": str(e),
+            }
+
     def send_selected_drafts(self, complaint_id: str, thread_id: str, draft_indexes: List[int], attachments: Optional[List[str]] = None) -> List[dict]:
         cs = self.complaints[complaint_id]
         if self.should_pause_actions(cs):
@@ -747,10 +886,19 @@ class ComplaintWarriorManager:
             agent = d.get("to_hint") or ts.label or "agent"
             subject = f"[AGENT={agent}] {d.get('subject') or cs.subject}"
             body = d.get("body") or ""
+            to_email, routing_meta = self._resolve_outbound_recipient(cs, d)
+            if routing_meta.get("test_redirect"):
+                body = (
+                    "DEBUG / NON-PRODUCTION SEND\n"
+                    f"Intended business recipient: {routing_meta.get('intended_recipient') or '[not found]'}\n"
+                    f"Actual recipient: {routing_meta.get('actual_recipient')}\n\n"
+                    + body
+                )
+
             self._ensure_gmail()
             res = send_email_with_attachments(
                 self.service,
-                to_email=TEST_INBOX_EMAIL,
+                to_email=to_email,
                 subject=subject,
                 body_text=body,
                 attachments=[p for p in attachments if p and os.path.exists(p)],
@@ -778,7 +926,7 @@ class ComplaintWarriorManager:
             self._append_activity(
                 cs, "email", "sent", "Email sent",
                 body[:500],
-                {"thread_id": thread_id, "gmail_msg_id": res.get("id"), "gmail_thread_id": res.get("threadId"), "subject": subject}
+                {"thread_id": thread_id, "gmail_msg_id": res.get("id"), "gmail_thread_id": res.get("threadId"), "subject": subject, **routing_meta}
             )
 
         cs.current_status_summary = "Initial demand sent; waiting for company response." if ts.stage == "awaiting_company_response" else cs.current_status_summary
@@ -799,13 +947,7 @@ class ComplaintWarriorManager:
 
     def _apply_satisfaction(self, cs: ComplaintState, ts: ThreadState, inbound_text: str, trusted: bool):
         # Build strategy safely
-        strategy_data = cs.strategy or {
-            "primary_goal": "general resolution",
-            "acceptable_fallbacks": [],
-            "escalate_if": [],
-            "evidence_needed": [],
-        }
-        strategy = ResolutionStrategy(**strategy_data)
+        strategy = _resolution_strategy_from_dict(cs.strategy)
 
         det = self.tp.detect_satisfaction_with_fallback(
             inbound_text=inbound_text,
@@ -929,6 +1071,198 @@ class ComplaintWarriorManager:
 
                 self._save(cs)
 
+
+    # -------------------- no-email-reply phone follow-up --------------------
+    def _parse_activity_ts(self, value: str) -> Optional[datetime]:
+        """Parse stored activity timestamps safely."""
+        if not value:
+            return None
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text)
+        except Exception:
+            # Older activities may use "YYYY-mm-dd HH:MM:SS".
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(str(value).strip(), fmt)
+                except Exception:
+                    pass
+        return None
+
+    def _latest_thread_activity(self, cs: ComplaintState, thread_id: str, *, channel: Optional[str] = None, kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the latest activity matching a thread/channel/kind filter."""
+        best = None
+        best_dt = None
+        for ev in cs.activities or []:
+            meta = ev.get("meta") or {}
+            if thread_id and meta.get("thread_id") != thread_id:
+                continue
+            if channel and (ev.get("channel") or "").lower() != channel.lower():
+                continue
+            if kind and (ev.get("kind") or "").lower() != kind.lower():
+                continue
+            ts_dt = self._parse_activity_ts(ev.get("ts") or "")
+            if ts_dt is None:
+                continue
+            if best_dt is None or ts_dt > best_dt:
+                best = ev
+                best_dt = ts_dt
+        return best
+
+    def get_phone_followup_status(self, complaint_id: str, thread_id: str, days_without_reply: int = 3, max_attempts: int = 2) -> Dict[str, Any]:
+        """Return whether phone follow-up is due after no email reply.
+
+        Rule:
+        - After an email is sent on this thread, wait days_without_reply days.
+        - If no later inbound email/phone reply is logged, phone follow-up is due.
+        - Automated mode may place up to max_attempts phone calls for that sent email.
+        """
+        cs = self.complaints[complaint_id]
+        sent_ev = self._latest_thread_activity(cs, thread_id, channel="email", kind="sent")
+        if not sent_ev:
+            return {
+                "due": False,
+                "reason": "No sent email found for this thread.",
+                "days_without_reply": 0,
+                "attempts": 0,
+                "remaining_attempts": max_attempts,
+                "last_sent_ts": "",
+            }
+
+        sent_ts = sent_ev.get("ts") or ""
+        sent_dt = self._parse_activity_ts(sent_ts)
+        if not sent_dt:
+            return {
+                "due": False,
+                "reason": "Could not parse last sent email timestamp.",
+                "days_without_reply": 0,
+                "attempts": 0,
+                "remaining_attempts": max_attempts,
+                "last_sent_ts": sent_ts,
+            }
+
+        now_dt = datetime.now(sent_dt.tzinfo) if sent_dt.tzinfo else datetime.now()
+        age_days = max(0.0, (now_dt - sent_dt).total_seconds() / 86400.0)
+
+        # Any later inbound reply (email or phone transcript) clears the no-reply condition.
+        latest_inbound = None
+        latest_inbound_dt = None
+        for ev in cs.activities or []:
+            meta = ev.get("meta") or {}
+            if meta.get("thread_id") != thread_id:
+                continue
+            if (ev.get("kind") or "").lower() != "received":
+                continue
+            if (ev.get("channel") or "").lower() not in {"email", "phone"}:
+                continue
+            ts_dt = self._parse_activity_ts(ev.get("ts") or "")
+            if ts_dt and ts_dt > sent_dt and (latest_inbound_dt is None or ts_dt > latest_inbound_dt):
+                latest_inbound = ev
+                latest_inbound_dt = ts_dt
+
+        if latest_inbound_dt:
+            return {
+                "due": False,
+                "reason": "A reply was received after the last sent email.",
+                "days_without_reply": age_days,
+                "attempts": 0,
+                "remaining_attempts": max_attempts,
+                "last_sent_ts": sent_ts,
+                "latest_reply_ts": latest_inbound.get("ts") or "",
+            }
+
+        attempts = 0
+        for ev in cs.activities or []:
+            meta = ev.get("meta") or {}
+            if meta.get("thread_id") != thread_id:
+                continue
+            if not meta.get("auto_followup_no_email_reply"):
+                continue
+            if meta.get("email_sent_ts") == sent_ts:
+                attempts += 1
+
+        due = age_days >= float(days_without_reply) and attempts < max_attempts and not self.should_pause_actions(cs)
+        remaining = max(0, max_attempts - attempts)
+        if due:
+            reason = f"No email reply for {age_days:.1f} days after the last sent email; phone follow-up is due."
+        elif attempts >= max_attempts:
+            reason = "Maximum automatic phone follow-up attempts reached for the last sent email."
+        elif self.should_pause_actions(cs):
+            reason = self.pause_reason(cs)
+        else:
+            reason = f"Waiting for email reply; phone follow-up becomes due after {days_without_reply} days."
+        return {
+            "due": bool(due),
+            "reason": reason,
+            "days_without_reply": age_days,
+            "attempts": attempts,
+            "remaining_attempts": remaining,
+            "max_attempts": max_attempts,
+            "last_sent_ts": sent_ts,
+            "threshold_days": days_without_reply,
+        }
+
+    def automated_phone_followup_if_due(self, complaint_id: str, thread_id: str, trusted: bool = False, days_without_reply: int = 3, max_attempts: int = 2) -> List[str]:
+        """Place up to max_attempts phone calls when no email reply arrived after 3 days."""
+        replies: List[str] = []
+        while True:
+            status = self.get_phone_followup_status(complaint_id, thread_id, days_without_reply, max_attempts)
+            if not status.get("due"):
+                break
+            cs = self.complaints[complaint_id]
+            attempt_no = int(status.get("attempts") or 0) + 1
+            self._append_activity(
+                cs,
+                "system",
+                "decision",
+                "Automatic phone follow-up due",
+                status.get("reason") or "No email reply after threshold; placing phone call.",
+                {
+                    "thread_id": thread_id,
+                    "auto_followup_no_email_reply": True,
+                    "attempt_no": attempt_no,
+                    "email_sent_ts": status.get("last_sent_ts") or "",
+                    "threshold_days": days_without_reply,
+                },
+            )
+            try:
+                reply = self.place_phone_call_and_capture_reply(complaint_id, thread_id)
+                replies.append(reply)
+                # Mark this attempt after the call so it is counted even if no transcript is captured.
+                self._append_activity(
+                    self.complaints[complaint_id],
+                    "phone",
+                    "call",
+                    f"Automatic phone follow-up attempt {attempt_no}",
+                    "Auto-call completed after no email reply for 3 days." + (" Transcript captured." if reply else " No transcript captured."),
+                    {
+                        "thread_id": thread_id,
+                        "auto_followup_no_email_reply": True,
+                        "attempt_no": attempt_no,
+                        "email_sent_ts": status.get("last_sent_ts") or "",
+                        "transcript_empty": not bool(reply),
+                    },
+                )
+                if reply and reply.strip():
+                    break
+            except Exception as exc:
+                self._append_activity(
+                    self.complaints[complaint_id],
+                    "phone",
+                    "call",
+                    f"Automatic phone follow-up attempt {attempt_no} failed",
+                    str(exc),
+                    {
+                        "thread_id": thread_id,
+                        "auto_followup_no_email_reply": True,
+                        "attempt_no": attempt_no,
+                        "email_sent_ts": status.get("last_sent_ts") or "",
+                        "error": True,
+                    },
+                )
+                break
+        return replies
+
     def automated_step(self, trusted: bool = False):
         """
         Logical sequencing:
@@ -950,6 +1284,16 @@ class ComplaintWarriorManager:
                         self.send_selected_drafts(cid, tid, [0], attachments=cs.docs)
         self._ensure_gmail()
         self.poll_once(trusted=trusted)
+
+        # After polling email, if a sent email has had no reply for 3 days,
+        # automated mode performs up to two phone follow-up attempts.
+        for cid, cs in list(self.complaints.items()):
+            if self.should_pause_actions(cs):
+                continue
+            for tid, ts in list(cs.threads.items()):
+                if tid.startswith("LOCAL-") or ts.status == "resolved":
+                    continue
+                self.automated_phone_followup_if_due(cid, tid, trusted=trusted, days_without_reply=3, max_attempts=2)
 
     def place_phone_call_and_capture_reply(self, complaint_id: str, thread_id: str, timeout: int = 300) -> str:
         cs = self.complaints[complaint_id]

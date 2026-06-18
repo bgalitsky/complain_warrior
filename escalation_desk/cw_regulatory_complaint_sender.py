@@ -124,6 +124,38 @@ OUTREACH_TABLE = "regulatory_outreach"
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
 
+def get_current_app_user_email() -> str:
+    """Return the Complaint Warrior app user whose complaints should be shown.
+
+    Because this regulatory module runs as a separate Streamlit app, it cannot
+    read cw_app_phone.py's Streamlit session directly. Set one of these in the
+    start script or config.ini to keep all modules on the same user:
+      export CW_APP_USER_EMAIL=customer@example.com
+      [User] email = customer@example.com
+      [AppUser] email = customer@example.com
+      [ComplaintWarrior] user_email = customer@example.com
+    """
+    candidates = [
+        os.environ.get("CW_APP_USER_EMAIL", ""),
+        os.environ.get("APP_USER_EMAIL", ""),
+        cfg_get("User", "email", ""),
+        cfg_get("AppUser", "email", ""),
+        cfg_get("ComplaintWarrior", "user_email", ""),
+    ]
+    for value in candidates:
+        value = clean_text(value).lower() if "clean_text" in globals() else str(value or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def filter_records_for_current_user(records: List["ComplaintRecord"]) -> List["ComplaintRecord"]:
+    current_user = get_current_app_user_email()
+    if not current_user:
+        return records
+    return [r for r in records if (r.user_email or "").strip().lower() == current_user]
+
+
 # -----------------------------------------------------------------------------
 # Organization registry
 # -----------------------------------------------------------------------------
@@ -491,6 +523,7 @@ def log_outreach(
 # Complaint Warrior native status update helper
 # -----------------------------------------------------------------------------
 MODULE_STATUS_LABELS = {
+    "resolved": "Resolved",
     "social_network_shared": "Social network shared",
     "charge_back_initiated": "Charge-back initiated",
     "submitted_to_small_claim_court": "Submitted to small claim court",
@@ -534,7 +567,10 @@ def update_native_complaint_module_status(
             statuses = {}
         for key, key_label in MODULE_STATUS_LABELS.items():
             statuses.setdefault(key, {"done": False, "label": key_label, "updated_at": None, "note": ""})
-            statuses[key]["label"] = key_label
+            if isinstance(statuses[key], dict):
+                statuses[key]["label"] = key_label
+            else:
+                statuses[key] = {"done": bool(statuses[key]), "label": key_label, "updated_at": None, "note": ""}
         statuses[status_key].update({
             "done": True,
             "label": label,
@@ -542,15 +578,18 @@ def update_native_complaint_module_status(
             "note": note or "",
         })
         obj["module_statuses"] = statuses
-        obj["current_status_summary"] = label
-        if status_key == "escalated_to_authorities":
-            obj["final_conclusion"] = "Escalated to authorities; awaiting agency response."
-            for thread in (obj.get("threads") or {}).values():
-                if isinstance(thread, dict):
-                    thread["status"] = "waiting_external_reply"
-                    thread["stage"] = "escalated_to_authorities"
-                    thread["drafts"] = []
-                    thread["last_decision"] = None
+        resolved_done = bool((statuses.get("resolved") or {}).get("done"))
+        already_resolved = resolved_done or "resolved" in str(obj.get("final_conclusion", "")).lower()
+        if not already_resolved:
+            obj["current_status_summary"] = label
+            if status_key == "escalated_to_authorities":
+                obj["final_conclusion"] = "Escalated to authorities; awaiting agency response."
+                for thread in (obj.get("threads") or {}).values():
+                    if isinstance(thread, dict):
+                        thread["status"] = "waiting_external_reply"
+                        thread["stage"] = "escalated_to_authorities"
+                        thread["drafts"] = []
+                        thread["last_decision"] = None
         activities = obj.get("activities")
         if not isinstance(activities, list):
             activities = []
@@ -1039,7 +1078,9 @@ def gmail_send_with_reauth(
 # Streamlit state helpers
 # -----------------------------------------------------------------------------
 def init_state() -> None:
+    st.session_state.setdefault("all_records", [])
     st.session_state.setdefault("records", [])
+    st.session_state.setdefault("selected_user_email", "")
     st.session_state.setdefault("selected_complaint_id", "")
     st.session_state.setdefault("drafts", [])
     st.session_state.setdefault("registry", DEFAULT_ORG_REGISTRY.copy())
@@ -1048,22 +1089,29 @@ def init_state() -> None:
     st.session_state.setdefault("generic_mapping", {})
 
 
+def complaint_option_label(record: ComplaintRecord) -> str:
+    title = clean_text(record.subject) or clean_text(record.company_name) or "Untitled complaint"
+    if len(title) > 90:
+        title = title[:87].rstrip() + "..."
+    return f"{record.complaint_id} — {title}"
+
+
 def records_to_df(records: List[ComplaintRecord]) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
+                "select": "",
                 "complaint_id": r.complaint_id,
-                "subject": r.subject,
+                "title": r.subject,
                 "company_name": r.company_name,
                 "user_email": r.user_email,
                 "created_at": r.created_at,
-                "source_table": r.source_table,
                 "preview": (r.display_text() or "")[:160],
+                "source_table": r.source_table,
             }
             for r in records
         ]
     )
-
 
 def get_selected_record() -> Optional[ComplaintRecord]:
     cid = st.session_state.get("selected_complaint_id")
@@ -1211,9 +1259,14 @@ def load_attachment_files_for_record(record: ComplaintRecord) -> List[Tuple[str,
 
 
 def auto_load_complaints_once() -> None:
-    """Load complaints from config/database path with no user path input."""
+    """Load all complaints from config/database path.
+
+    IMPORTANT: this function does not expose all complaints in the UI. It loads
+    them into memory only so the user can explicitly choose a user/email filter
+    before any complaint grid is displayed.
+    """
     db_path = DEFAULT_DB_PATH
-    already_loaded = bool(st.session_state.get("records")) and st.session_state.get("loaded_db_path") == db_path
+    already_loaded = bool(st.session_state.get("all_records")) and st.session_state.get("loaded_db_path") == db_path
     attempted = st.session_state.get("auto_load_attempted_for") == db_path
     if already_loaded or attempted:
         return
@@ -1221,14 +1274,37 @@ def auto_load_complaints_once() -> None:
     st.session_state.auto_load_attempted_for = db_path
     try:
         records, source, mapping = load_complaints(db_path)
-        st.session_state.records = records
+        st.session_state.all_records = records
+        st.session_state.records = []
         st.session_state.loaded_db_path = db_path
         st.session_state.db_source = source
         st.session_state.generic_mapping = mapping
         st.session_state.registry = load_registry_from_config()
         st.session_state.drafts = []
+
     except Exception as e:
         st.session_state.auto_load_error = str(e)
+
+
+def _available_user_emails(records: List[ComplaintRecord]) -> List[str]:
+    return sorted({(r.user_email or "").strip().lower() for r in records if (r.user_email or "").strip()})
+
+
+def _apply_selected_user_filter() -> None:
+    selected = (st.session_state.get("selected_user_email") or "").strip().lower()
+    all_records = st.session_state.get("all_records") or []
+    if not selected:
+        st.session_state.records = []
+        st.session_state.selected_complaint_id = ""
+        st.session_state.drafts = []
+        return
+
+    filtered = [r for r in all_records if (r.user_email or "").strip().lower() == selected]
+    previous_cid = st.session_state.get("selected_complaint_id", "")
+    st.session_state.records = filtered
+    if previous_cid not in {r.complaint_id for r in filtered}:
+        st.session_state.selected_complaint_id = filtered[0].complaint_id if filtered else ""
+        st.session_state.drafts = []
 
 
 # -----------------------------------------------------------------------------
@@ -1302,7 +1378,8 @@ def main() -> None:
             )
         return
 
-    if not st.session_state.records:
+    all_records = st.session_state.get("all_records") or []
+    if not all_records:
         st.info("No complaints found in the configured database.")
         with st.expander("Expected database formats"):
             st.markdown(
@@ -1314,13 +1391,47 @@ def main() -> None:
             )
         return
 
-    st.success(f"Loaded {len(st.session_state.records)} complaint(s) from {st.session_state.db_source}.")
+    st.success(f"Loaded complaint database from {st.session_state.db_source}.")
     if st.button("Refresh complaints from configured database"):
+        st.session_state.all_records = []
         st.session_state.records = []
+        st.session_state.selected_user_email = ""
+        st.session_state.selected_complaint_id = ""
         st.session_state.drafts = []
         st.session_state.auto_load_error = ""
         st.session_state.auto_load_attempted_for = ""
         st.rerun()
+
+    st.subheader("0) Enter Complaint Warrior user email")
+    if not _available_user_emails(all_records):
+        st.error("No user_email values were found in the complaints table. Refusing to show complaints without a user filter.")
+        return
+
+    current_selection = (st.session_state.get("selected_user_email") or "").strip().lower()
+    selected_user = st.text_input(
+        "Your Complaint Warrior email",
+        value=current_selection,
+        placeholder="you@example.com",
+        help="Only complaints whose owner email exactly matches this value will be shown. Other users are never listed.",
+    ).strip().lower()
+
+    if selected_user != st.session_state.get("selected_user_email"):
+        st.session_state.selected_user_email = selected_user
+        _apply_selected_user_filter()
+        st.rerun()
+
+    st.session_state.selected_user_email = selected_user
+    _apply_selected_user_filter()
+
+    if not selected_user:
+        st.warning("Enter your Complaint Warrior email. No complaints are shown until this field is filled.")
+        return
+
+    if not st.session_state.records:
+        st.warning("No complaints found for this email. Nothing else is displayed.")
+        return
+
+    st.success(f"Showing {len(st.session_state.records)} complaint(s) for {selected_user}.")
 
     if st.session_state.generic_mapping:
         with st.expander("Detected generic database columns", expanded=False):
@@ -1329,19 +1440,58 @@ def main() -> None:
     # 1) Select complaint
     st.subheader("1) Select complaint")
     df = records_to_df(st.session_state.records)
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    ids = [r.complaint_id for r in st.session_state.records]
+    st.caption(f"Showing only complaints for entered email: {st.session_state.selected_user_email}")
+
+    grid_event = None
+    try:
+        grid_event = st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            key="complaints_grid",
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={
+                "select": st.column_config.TextColumn("", width="small"),
+                "complaint_id": st.column_config.TextColumn("Complaint ID", width="medium"),
+                "title": st.column_config.TextColumn("Title", width="large"),
+                "preview": st.column_config.TextColumn("Preview", width="large"),
+            },
+        )
+    except TypeError:
+        # Older Streamlit versions do not support row selection in st.dataframe.
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.caption("Upgrade Streamlit to use row/cell click selection in the grid: pip install -U streamlit")
+
+    if grid_event is not None:
+        try:
+            selected_rows = grid_event.selection.rows
+            if selected_rows:
+                selected_idx = int(selected_rows[0])
+                if 0 <= selected_idx < len(st.session_state.records):
+                    st.session_state.selected_complaint_id = st.session_state.records[selected_idx].complaint_id
+        except Exception:
+            pass
+
+    option_by_label = {complaint_option_label(r): r.complaint_id for r in st.session_state.records}
+    labels = list(option_by_label.keys())
+    ids = list(option_by_label.values())
     if not st.session_state.selected_complaint_id and ids:
         st.session_state.selected_complaint_id = ids[0]
 
-    st.session_state.selected_complaint_id = st.selectbox(
-        "Complaint ID",
-        ids,
-        index=ids.index(st.session_state.selected_complaint_id)
-        if st.session_state.selected_complaint_id in ids
-        else 0,
+    current_label = next(
+        (label for label, cid in option_by_label.items() if cid == st.session_state.selected_complaint_id),
+        labels[0] if labels else "",
     )
+
+    selected_label = st.selectbox(
+        "Complaint",
+        labels,
+        index=labels.index(current_label) if current_label in labels else 0,
+        help="The dropdown shows both the complaint ID and readable title. You can also select a row/cell in the grid above.",
+    )
+    st.session_state.selected_complaint_id = option_by_label.get(selected_label, st.session_state.selected_complaint_id)
 
     record = get_selected_record()
     if not record:

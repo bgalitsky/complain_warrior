@@ -197,6 +197,84 @@ class FilingPacket:
     notes: list[str]
 
 
+
+# -----------------------------
+# Complaint Warrior native status update helper
+# -----------------------------
+MODULE_STATUS_LABELS = {
+    "resolved": "Resolved",
+    "social_network_shared": "Social network shared",
+    "charge_back_initiated": "Charge-back initiated",
+    "submitted_to_small_claim_court": "Submitted to small claim court",
+    "escalated_to_authorities": "Escalated to authorities",
+}
+
+def update_native_complaint_module_status_conn(
+    conn: sqlite3.Connection,
+    complaint_id: str,
+    status_key: str,
+    note: str = "",
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Update Complaint Warrior native complaints.complaint_json in the open DB."""
+    if status_key not in MODULE_STATUS_LABELS or not complaint_id:
+        return False
+    label = MODULE_STATUS_LABELS[status_key]
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cols = [r[1] for r in conn.execute("PRAGMA table_info('complaints')").fetchall()]
+    if "complaint_id" not in cols or "complaint_json" not in cols:
+        return False
+    row = conn.execute(
+        "SELECT complaint_json FROM complaints WHERE complaint_id=? LIMIT 1",
+        (complaint_id,),
+    ).fetchone()
+    if not row:
+        return False
+    obj = json_loads_safe(row[0])
+    statuses = obj.get("module_statuses")
+    if not isinstance(statuses, dict):
+        statuses = {}
+    for key, key_label in MODULE_STATUS_LABELS.items():
+        statuses.setdefault(key, {"done": False, "label": key_label, "updated_at": None, "note": ""})
+        statuses[key]["label"] = key_label
+    statuses[status_key].update({
+        "done": True,
+        "label": label,
+        "updated_at": now_iso,
+        "note": note or "",
+    })
+    obj["module_statuses"] = statuses
+    resolved_done = bool((statuses.get("resolved") or {}).get("done"))
+    already_resolved = resolved_done or "resolved" in str(obj.get("final_conclusion", "")).lower()
+    if not already_resolved:
+        obj["current_status_summary"] = label
+        if status_key == "submitted_to_small_claim_court":
+            obj["final_conclusion"] = "Submitted to small claim court; awaiting hearing or settlement."
+            for thread in (obj.get("threads") or {}).values():
+                if isinstance(thread, dict):
+                    thread["status"] = "submitted"
+                    thread["stage"] = "submitted_to_small_claim_court"
+                    thread["drafts"] = []
+                    thread["last_decision"] = None
+    activities = obj.get("activities")
+    if not isinstance(activities, list):
+        activities = []
+    activities.append({
+        "ts": now_iso,
+        "channel": "small_claims",
+        "kind": "status",
+        "title": label,
+        "detail": note or "Small-claims packet saved/submitted.",
+        "meta": {"status_key": status_key, **(meta or {})},
+    })
+    obj["activities"] = activities
+    conn.execute(
+        "UPDATE complaints SET complaint_json=?, updated_at=? WHERE complaint_id=?",
+        (json.dumps(obj, ensure_ascii=False), time.time(), complaint_id),
+    )
+    conn.commit()
+    return True
+
 # -----------------------------
 # Generic helpers
 # -----------------------------
@@ -562,6 +640,7 @@ def complaint_warrior_preview_df(records: list[CaseRecord]) -> pd.DataFrame:
         rows.append(
             {
                 "complaint_id": r.case_id,
+                "title": record_title(r),
                 "company_name": r.company_name,
                 "amount": r.amount,
                 "county": r.county,
@@ -1455,6 +1534,144 @@ def build_download_zip(packet: FilingPacket, filled_pdf: bytes | None = None, pa
     return zip_buffer.getvalue()
 
 
+
+
+# -----------------------------
+# User isolation and safe case selection
+# -----------------------------
+def get_available_user_emails(conn: sqlite3.Connection) -> list[str]:
+    """Return user emails present in the connected Complaint Warrior database.
+
+    Privacy rule: external modules must never show complaints until the user
+    selects an owner email. This prevents one user's complaints from appearing
+    in another user's module session.
+    """
+    emails: set[str] = set()
+    try:
+        if is_complaint_warrior_db(conn):
+            rows = conn.execute("SELECT user_email, complaint_json FROM complaints").fetchall()
+            for user_email, complaint_json in rows:
+                if clean_text(user_email):
+                    emails.add(clean_text(user_email).lower())
+                obj = json_loads_safe(complaint_json)
+                if clean_text(obj.get("user_email")):
+                    emails.add(clean_text(obj.get("user_email")).lower())
+        else:
+            table = auto_detect_table(conn)
+            if table:
+                cols = get_columns(conn, table)
+                mapping = auto_detect_columns(cols)
+                email_col = mapping.get("consumer_email")
+                if email_col:
+                    for (email,) in conn.execute(f"SELECT DISTINCT [{email_col}] FROM [{table}] WHERE [{email_col}] IS NOT NULL"):
+                        if clean_text(email):
+                            emails.add(clean_text(email).lower())
+    except Exception:
+        pass
+    return sorted(emails)
+
+
+def mandatory_user_filter_ui(conn: sqlite3.Connection) -> Optional[str]:
+    """Require typed user email; do not expose a dropdown of all users."""
+    st.subheader("0) Enter Complaint Warrior user email")
+    if not get_available_user_emails(conn):
+        st.error("No user emails were found in the connected database. Refusing to show complaints without a user filter.")
+        return None
+    typed = st.text_input(
+        "Your Complaint Warrior email",
+        value=st.session_state.get("mandatory_cw_user_email", ""),
+        placeholder="you@example.com",
+        key="mandatory_cw_user_email",
+        help="Only cases owned by this exact email will be shown. Other users are never listed.",
+    ).strip().lower()
+    if not typed:
+        st.warning("Enter your Complaint Warrior email before any complaints are displayed.")
+        return None
+    return typed
+
+
+def record_owner_email(record: CaseRecord) -> str:
+    raw = record.raw_row if isinstance(record.raw_row, dict) else {}
+    return clean_text(raw.get("user_email") or record.consumer_email).lower()
+
+
+def filter_records_by_user(records: list[CaseRecord], user_email: str) -> list[CaseRecord]:
+    user_email = clean_text(user_email).lower()
+    return [r for r in records if record_owner_email(r) == user_email]
+
+
+def record_title(record: CaseRecord) -> str:
+    raw = record.raw_row if isinstance(record.raw_row, dict) else {}
+    return first_non_empty([
+        raw.get("subject"),
+        raw.get("title"),
+        record.company_name,
+        record.complaint_text[:90],
+        "Untitled complaint",
+    ])
+
+
+def readable_case_label(record: CaseRecord) -> str:
+    return f"{record.case_id} — {record_title(record)}"
+
+
+def selectable_cases_df(records: list[CaseRecord]) -> pd.DataFrame:
+    rows = []
+    for r in records:
+        rows.append({
+            "complaint_id": r.case_id,
+            "title": record_title(r),
+            "company_name": r.company_name,
+            "amount": r.amount,
+            "county": r.county,
+            "status": r.status,
+            "consumer_email": r.consumer_email,
+            "demand_date": r.demand_date,
+        })
+    return pd.DataFrame(rows)
+
+
+def select_case_from_grid_and_dropdown(records: list[CaseRecord], label: str) -> Optional[CaseRecord]:
+    if not records:
+        st.warning("No complaints are available for the selected user/filter.")
+        return None
+
+    df = selectable_cases_df(records)
+    st.caption("Select a row in the grid, or use the dropdown below. The dropdown shows complaint id and title.")
+    selected_from_grid = None
+    try:
+        event = st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            key=f"{label}_grid",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+        rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
+        if rows:
+            selected_from_grid = df.iloc[int(rows[0])]["complaint_id"]
+    except TypeError:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    ids = [r.case_id for r in records]
+    if selected_from_grid in ids:
+        st.session_state[f"{label}_selected_case_id"] = selected_from_grid
+
+    labels = [readable_case_label(r) for r in records]
+    current_id = st.session_state.get(f"{label}_selected_case_id")
+    current_index = ids.index(current_id) if current_id in ids else 0
+    selected_label = st.selectbox(
+        "Choose case",
+        labels,
+        index=current_index,
+        key=f"{label}_dropdown",
+    )
+    selected_record = records[labels.index(selected_label)]
+    st.session_state[f"{label}_selected_case_id"] = selected_record.case_id
+    return selected_record
+
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -1497,26 +1714,24 @@ def connection_ui() -> tuple[Optional[sqlite3.Connection], Optional[str]]:
 
 
 
-def native_case_browser_ui(conn: sqlite3.Connection) -> tuple[list[CaseRecord], Optional[CaseRecord]]:
-    records = build_native_case_records(conn)
+def native_case_browser_ui(conn: sqlite3.Connection, user_email: str) -> tuple[list[CaseRecord], Optional[CaseRecord]]:
+    records_all = build_native_case_records(conn)
+    records = filter_records_by_user(records_all, user_email)
     st.subheader("1) Complaint Warrior cases")
-    st.caption("Native Complaint Warrior schema detected. This app now reads JSON cases from the complaints table and merges phone transcripts from call_results.")
-    preview_df = complaint_warrior_preview_df(records)
-    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    st.caption("Only complaints owned by the selected Complaint Warrior user are shown.")
+
+    if not records:
+        st.warning(f"No Complaint Warrior cases found for {user_email}.")
+        return records_all, None
 
     only_ready = st.checkbox("Show only cases likely ready for small claims", value=True)
     visible = [r for r in records if record_is_exhausted(r)] if only_ready else records
     if not visible:
-        st.info("No cases were clearly marked as exhausted. Showing all Complaint Warrior cases instead.")
+        st.info("No cases for this user were clearly marked as exhausted. Showing this user's cases instead.")
         visible = records
 
-    labels = [
-        f"{r.case_id} | {r.company_name or 'Review defendant name'} | {fmt_money(r.amount)} | {r.status or 'No status'}"
-        for r in visible
-    ]
-    selected_label = st.selectbox("2) Choose Complaint Warrior case", labels)
-    return records, visible[labels.index(selected_label)]
-
+    selected = select_case_from_grid_and_dropdown(visible, "native_small_claims")
+    return records_all, selected
 
 
 def select_mapping_ui(conn: sqlite3.Connection) -> tuple[Optional[str], dict[str, Optional[str]], Optional[pd.DataFrame]]:
@@ -1549,24 +1764,19 @@ def select_mapping_ui(conn: sqlite3.Connection) -> tuple[Optional[str], dict[str
 
 
 
-def select_case_ui(records: list[CaseRecord]) -> Optional[CaseRecord]:
+def select_case_ui(records: list[CaseRecord], user_email: str) -> Optional[CaseRecord]:
+    records = filter_records_by_user(records, user_email)
     if not records:
-        st.warning("No rows were loaded from the selected table.")
+        st.warning(f"No rows were loaded for selected user {user_email}.")
         return None
 
     only_exhausted = st.checkbox("Show only exhausted / unresolved cases", value=True)
     visible = [r for r in records if record_is_exhausted(r)] if only_exhausted else records
     if not visible:
-        st.info("No rows matched the exhausted-case filter. Showing all rows instead.")
+        st.info("No rows matched the exhausted-case filter for this user. Showing this user's rows instead.")
         visible = records
 
-    labels = [
-        f"{r.case_id} | {r.company_name or 'Unknown company'} | {fmt_money(r.amount)} | {r.county or 'No county'} | {r.status or 'No status'}"
-        for r in visible
-    ]
-    selected_label = st.selectbox("2) Choose case", labels)
-    return visible[labels.index(selected_label)]
-
+    return select_case_from_grid_and_dropdown(visible, "generic_small_claims")
 
 
 def extracted_contacts_ui(record: CaseRecord) -> None:
@@ -1584,9 +1794,217 @@ def extracted_contacts_ui(record: CaseRecord) -> None:
 
 
 
+# -----------------------------
+# Process serving helpers
+# -----------------------------
+US_STATE_OPTIONS = [
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware",
+    "District of Columbia", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa",
+    "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
+    "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey",
+    "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon",
+    "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah",
+    "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
+]
+
+STATE_ABBR = {
+    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR", "California": "CA",
+    "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE", "District of Columbia": "DC", "Florida": "FL",
+    "Georgia": "GA", "Hawaii": "HI", "Idaho": "ID", "Illinois": "IL", "Indiana": "IN", "Iowa": "IA",
+    "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD", "Massachusetts": "MA",
+    "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO", "Montana": "MT", "Nebraska": "NE",
+    "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY",
+    "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
+    "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC", "South Dakota": "SD", "Tennessee": "TN",
+    "Texas": "TX", "Utah": "UT", "Vermont": "VT", "Virginia": "VA", "Washington": "WA", "West Virginia": "WV",
+    "Wisconsin": "WI", "Wyoming": "WY",
+}
+
+STATE_BUSINESS_SEARCH_URLS = {
+    "California": "https://bizfileonline.sos.ca.gov/search/business",
+    "Delaware": "https://icis.corp.delaware.gov/Ecorp/EntitySearch/NameSearch.aspx",
+    "Florida": "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
+    "Nevada": "https://esos.nv.gov/EntitySearch/OnlineEntitySearch",
+    "New York": "https://apps.dos.ny.gov/publicInquiry/",
+    "Texas": "https://mycpa.cpa.state.tx.us/coa/",
+    "Washington": "https://ccfs.sos.wa.gov/#/BusinessSearch",
+    "Oregon": "https://sos.oregon.gov/business/Pages/find.aspx",
+    "Arizona": "https://ecorp.azcc.gov/EntitySearch/Index",
+    "Colorado": "https://www.sos.state.co.us/biz/BusinessEntityCriteriaExt.do",
+}
+
+STATE_SERVICE_INSTRUCTIONS = {
+    "California": [
+        "After filing, serve each defendant with a filed copy of SC-100 and any local court attachments.",
+        "You personally may not serve the defendant. Use the sheriff, a registered process server, or an adult who is not a party to the case.",
+        "For a corporation/LLC, serve the registered agent for service of process or another person authorized by California law.",
+        "After service, file Proof of Service (SC-104) with the court before the deadline shown by the court.",
+        "Bring a copy of the filed proof of service to the hearing.",
+    ],
+    "Florida": [
+        "After filing, use the clerk/sheriff or a certified process server where required by local practice.",
+        "Serve the registered agent or another legally authorized representative of the business.",
+        "Keep the return/proof of service and file it with the court as required before the hearing.",
+    ],
+    "New York": [
+        "Follow the small-claims clerk's service procedure; many New York small-claims courts arrange service by mail, but rules vary by court.",
+        "For businesses, use the correct legal entity name and a valid service address/registered agent address.",
+        "Keep any affidavit/certificate/proof of service and confirm it is filed before the hearing.",
+    ],
+    "Texas": [
+        "Ask the clerk to issue citation after filing, then arrange service by sheriff/constable or authorized private process server.",
+        "Serve the registered agent, owner, officer, or other legally authorized representative for the entity type.",
+        "Confirm the return of service is filed with the court before requesting default judgment or proceeding to hearing.",
+    ],
+}
+
+
+def state_abbreviation(state: str) -> str:
+    return STATE_ABBR.get(clean_text(state), clean_text(state).upper()[:2])
+
+
+def official_business_search_url(state: str) -> str:
+    state = clean_text(state)
+    return STATE_BUSINESS_SEARCH_URLS.get(state, f"https://www.google.com/search?q={state.replace(' ', '+')}+secretary+of+state+business+search")
+
+
+def process_server_search_url(state: str, service_address: str = "") -> str:
+    query = f"registered process server {clean_text(state)} {clean_text(service_address)}".strip()
+    return "https://www.google.com/search?q=" + re.sub(r"\s+", "+", query)
+
+
+def extract_service_address_candidates(record: CaseRecord, business_name: str = "") -> list[dict[str, str]]:
+    """Disabled: do not infer service addresses from free-text complaint logs.
+
+    Prior versions tried to extract street-like strings from complaint/log text.
+    That produced false positives from phone numbers, dollar amounts, and free text.
+    For process serving, the address must be verified from an official business
+    registry, registered-agent record, court-approved source, or entered manually
+    by the user.
+    """
+    return []
+
+
+def render_service_instructions_markdown(state: str, business_name: str, service_address: str, process_server_name: str = "", process_server_contact: str = "") -> str:
+    state = clean_text(state) or "the selected state"
+    business_name = clean_text(business_name) or "the defendant business"
+    service_address = clean_text(service_address) or "[confirmed service address]"
+    process_server_name = clean_text(process_server_name) or "[process server / sheriff / authorized adult]"
+    process_server_contact = clean_text(process_server_contact)
+    steps = STATE_SERVICE_INSTRUCTIONS.get(state, [
+        "Confirm the correct service method with the small-claims clerk or state court self-help site before serving.",
+        "Use the defendant's exact legal name and a verified physical service address or registered-agent address.",
+        "Do not serve the papers yourself if the state or court requires a non-party, sheriff, constable, or professional process server.",
+        "After service, obtain the signed proof/return/affidavit of service and file it with the court before the hearing or default deadline.",
+    ])
+    lines = [
+        f"# Process Serving Instructions — {state}",
+        "",
+        f"**Defendant/business:** {business_name}",
+        f"**Address selected for service:** {service_address}",
+        f"**Server:** {process_server_name}",
+    ]
+    if process_server_contact:
+        lines.append(f"**Server contact:** {process_server_contact}")
+    lines.extend([
+        "",
+        "## Steps",
+    ])
+    lines.extend([f"{idx}. {step}" for idx, step in enumerate(steps, start=1)])
+    lines.extend([
+        "",
+        "## Before handing papers to the server",
+        "- Confirm the defendant's exact legal entity name in the official state business registry.",
+        "- Confirm whether the address is a registered-agent address, principal office, branch, or other service-eligible address.",
+        "- Provide the filed complaint, summons/notice, court date information, and any local forms required by the court.",
+        "- Ask the server to return a completed proof/affidavit/return of service with date, time, person served, and method of service.",
+        "",
+        "This is a workflow aid, not legal advice. Verify the current rule with the court clerk or official state court self-help site.",
+    ])
+    return "\n".join(lines)
+
+
+def process_serving_pane(record: CaseRecord, packet: Optional[FilingPacket]) -> None:
+    st.markdown("### Process serving")
+    st.caption("Find and verify a service address/registered-agent address, then prepare service instructions for the selected state.")
+
+    raw = record.raw_row if isinstance(record.raw_row, dict) else {}
+    saved_key = f"process_serving_{record.case_id}"
+    saved = st.session_state.get(saved_key, {}) if isinstance(st.session_state.get(saved_key), dict) else {}
+
+    default_state = saved.get("state") or (packet.sc100.get("defendant_state") if packet else "") or raw.get("state") or "California"
+    if default_state not in US_STATE_OPTIONS:
+        default_state = "California"
+    default_business = saved.get("business_name") or (packet.sc100.get("defendant_legal_name") if packet else "") or record.company_name
+    default_address = saved.get("service_address") or (packet.sc100.get("defendant_street") if packet else "")
+    if packet and packet.sc100.get("defendant_city"):
+        default_address = assemble_address(
+            packet.sc100.get("defendant_street", ""),
+            packet.sc100.get("defendant_city", ""),
+            packet.sc100.get("defendant_state", ""),
+            packet.sc100.get("defendant_zip", ""),
+        )
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        state = st.selectbox("State for defendant/service", US_STATE_OPTIONS, index=US_STATE_OPTIONS.index(default_state), key=f"{saved_key}_state")
+        business_name = st.text_input("Business / defendant legal name", value=default_business, key=f"{saved_key}_business")
+    with c2:
+        st.markdown("**Official lookup links**")
+        st.markdown(f"[Open official/state business search]({official_business_search_url(state)})")
+        st.markdown(f"[Search for process servers near address]({process_server_search_url(state, default_address)})")
+        st.caption("Use the official registry to verify registered agent and service address. Use the process-server search only to choose a server; it does not verify defendant address.")
+
+    st.info(
+        "Service address extraction from complaint text is disabled because it can produce false addresses. "
+        "Use the official state business search link above to find the registered agent/service address, "
+        "then paste the verified address below."
+    )
+
+    service_address = st.text_area(
+        "Verified service address / registered agent address",
+        value=saved.get("service_address") or default_address,
+        height=90,
+        key=f"{saved_key}_address",
+        help="Enter the address verified in the Secretary of State/business registry or court-approved source.",
+    )
+    process_server_name = st.text_input("Process server / sheriff / constable / authorized adult", value=saved.get("process_server_name", ""), key=f"{saved_key}_server")
+    process_server_contact = st.text_input("Process server contact/address (optional)", value=saved.get("process_server_contact", ""), key=f"{saved_key}_server_contact")
+
+    instructions_md = render_service_instructions_markdown(
+        state=state,
+        business_name=business_name,
+        service_address=service_address,
+        process_server_name=process_server_name,
+        process_server_contact=process_server_contact,
+    )
+
+    if st.button("Save process-serving plan", key=f"{saved_key}_save"):
+        st.session_state[saved_key] = {
+            "state": state,
+            "business_name": business_name,
+            "service_address": service_address,
+            "process_server_name": process_server_name,
+            "process_server_contact": process_server_contact,
+            "instructions_md": instructions_md,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        st.success("Process-serving plan saved in this session.")
+
+    st.markdown("#### Serving instructions")
+    st.markdown(instructions_md)
+    st.download_button(
+        "Download process-serving instructions",
+        data=text_bytes(instructions_md),
+        file_name=f"process_serving_{record.case_id}.md",
+        mime="text/markdown",
+        key=f"{saved_key}_download",
+    )
+
+
 def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPacket | None:
     st.subheader("3) Review and generate court packet")
-    tab1, tab2, tab3, tab4 = st.tabs(["Intake", "SC-100 draft", "Evidence", "Workflow"])
+    tab1, tab2, tab_process, tab3, tab4 = st.tabs(["Intake", "SC-100 draft", "Process serving", "Evidence", "Workflow"])
 
     saved_packet_row = load_latest_saved_packet(conn, record.case_id)
     saved_sc100 = (saved_packet_row or {}).get("packet_json_parsed") or {}
@@ -1715,6 +2133,9 @@ def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPa
         else:
             st.info("Generate the packet in the Intake tab first.")
 
+    with tab_process:
+        process_serving_pane(record, packet)
+
     with tab3:
         if packet:
             dmg_df = pd.DataFrame(packet.damages_rows)
@@ -1825,8 +2246,18 @@ def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Opti
                     packet_pdf=st.session_state.get("packet_pdf"),
                     filled_sc100_pdf=st.session_state.get("filled_sc100_pdf"),
                 )
+                small_status_updated = update_native_complaint_module_status_conn(
+                    conn,
+                    save_info["complaint_id"],
+                    "submitted_to_small_claim_court",
+                    note=f"Small-claims packet #{save_info['packet_id']} saved into the Complaint Warrior database.",
+                    meta={"packet_id": save_info["packet_id"]},
+                )
                 st.session_state["saved_packet_info"] = save_info
-                st.success(f"Saved packet #{save_info['packet_id']} for case {save_info['complaint_id']} into small_claim_packets.")
+                if small_status_updated:
+                    st.success(f"Saved packet #{save_info['packet_id']} for case {save_info['complaint_id']} and updated status to submitted to small claim court.")
+                else:
+                    st.success(f"Saved packet #{save_info['packet_id']} for case {save_info['complaint_id']} into small_claim_packets.")
             except Exception as exc:
                 st.error(f"Could not save packet into Complaint Warrior DB: {exc}")
     saved_info = st.session_state.get("saved_packet_info")
@@ -1857,15 +2288,19 @@ def main() -> None:
     if conn is None:
         st.stop()
 
+    selected_user_email = mandatory_user_filter_ui(conn)
+    if not selected_user_email:
+        st.stop()
+
     try:
         if is_complaint_warrior_db(conn):
-            _records, record = native_case_browser_ui(conn)
+            _records, record = native_case_browser_ui(conn, selected_user_email)
         else:
             _, mapping, preview_df = select_mapping_ui(conn)
             if preview_df is None:
                 st.stop()
             records = build_case_records(preview_df, mapping)
-            record = select_case_ui(records)
+            record = select_case_ui(records, selected_user_email)
         if record is None:
             st.stop()
 

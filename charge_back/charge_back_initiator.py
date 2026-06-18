@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, asdict
+import pandas as pd
 
 
 class TokenRefreshError(RuntimeError):
@@ -446,6 +447,167 @@ def save_outreach_record(
         ),
     )
     con.commit()
+
+
+# -----------------------------
+# Complaint Warrior native module status helper
+# -----------------------------
+MODULE_STATUS_LABELS = {
+    "resolved": "Resolved",
+    "social_network_shared": "Social network shared",
+    "charge_back_initiated": "Charge-back initiated",
+    "charge_back_temporary_credit": "Charge-back successful: temporary credit issued",
+    "charge_back_won": "Charge-back won / permanent credit",
+    "submitted_to_small_claim_court": "Submitted to small claim court",
+    "escalated_to_authorities": "Escalated to authorities",
+}
+
+CHARGE_BACK_SUCCESS_KEYS = {
+    "charge_back_temporary_credit",
+    "charge_back_won",
+}
+
+def _cw_json_loads_safe(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+def update_native_complaint_module_status_conn(
+    con: sqlite3.Connection,
+    complaint_id: str,
+    status_key: str,
+    note: str = "",
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Update complaints.complaint_json.module_statuses for the main CW UI.
+
+    External modules such as Charge-back Initiator write their own detail tables.
+    The main Complaint Warrior page, however, displays module_statuses from the
+    native complaints JSON. This helper keeps both places synchronized.
+    """
+    if status_key not in MODULE_STATUS_LABELS or not complaint_id:
+        return False
+
+    cols = [r[1] for r in con.execute("PRAGMA table_info('complaints')").fetchall()]
+    if "complaint_id" not in cols or "complaint_json" not in cols:
+        return False
+
+    row = con.execute(
+        "SELECT complaint_json FROM complaints WHERE complaint_id=? LIMIT 1",
+        (complaint_id,),
+    ).fetchone()
+    if not row:
+        return False
+
+    obj = _cw_json_loads_safe(row[0])
+    statuses = obj.get("module_statuses")
+    if not isinstance(statuses, dict):
+        statuses = {}
+
+    for key, label in MODULE_STATUS_LABELS.items():
+        statuses.setdefault(key, {"done": False, "label": label, "updated_at": None, "note": ""})
+        if isinstance(statuses[key], dict):
+            statuses[key]["label"] = label
+        else:
+            statuses[key] = {"done": bool(statuses[key]), "label": label, "updated_at": None, "note": ""}
+
+    now_iso = dt.datetime.now().isoformat(timespec="seconds")
+    label = MODULE_STATUS_LABELS[status_key]
+    statuses[status_key].update({
+        "done": True,
+        "label": label,
+        "updated_at": now_iso,
+        "note": note or "",
+    })
+    obj["module_statuses"] = statuses
+
+    # Charge-back success statuses imply the charge-back path was initiated and
+    # the complaint is resolved for Complaint Warrior purposes. Keep the more
+    # specific charge-back milestone visible in module_statuses, and also set
+    # resolved so the main CW app stops escalation.
+    if status_key in CHARGE_BACK_SUCCESS_KEYS:
+        statuses["charge_back_initiated"].update({
+            "done": True,
+            "label": MODULE_STATUS_LABELS["charge_back_initiated"],
+            "updated_at": statuses[status_key]["updated_at"],
+            "note": "Charge-back request accepted by bank before this success notice.",
+        })
+        statuses["resolved"].update({
+            "done": True,
+            "label": MODULE_STATUS_LABELS["resolved"],
+            "updated_at": statuses[status_key]["updated_at"],
+            "note": note or label,
+        })
+        obj["module_statuses"] = statuses
+
+    # Resolved has highest priority and should visibly close the main CW case.
+    # Other module statuses are still recorded, but they do not overwrite an
+    # already-resolved complaint summary.
+    if status_key == "resolved" or status_key in CHARGE_BACK_SUCCESS_KEYS:
+        if status_key == "charge_back_temporary_credit":
+            obj["current_status_summary"] = "Charge-back request successful: temporary/provisional bank credit issued."
+            obj["final_conclusion"] = note or "The bank issued a temporary/provisional credit while researching the claim."
+            action_text = "No further charge-back escalation is recommended unless the bank later reverses the temporary credit."
+            title_text = "Charge-back successful: temporary credit issued"
+        elif status_key == "charge_back_won":
+            obj["current_status_summary"] = "Charge-back won: permanent credit issued."
+            obj["final_conclusion"] = note or "The bank finalized the charge-back in the consumer's favor."
+            action_text = "No further charge-back escalation is recommended."
+            title_text = "Charge-back won"
+        else:
+            obj["current_status_summary"] = "Complaint resolved."
+            obj["final_conclusion"] = note or "Complaint resolved."
+            action_text = "No further action is recommended. Verify that the promised remedy is actually received."
+            title_text = "Complaint resolved"
+
+        for thread in (obj.get("threads") or {}).values():
+            if isinstance(thread, dict):
+                thread["status"] = "resolved"
+                thread["stage"] = "resolved"
+                thread["drafts"] = []
+                thread["last_decision"] = None
+        strategy = obj.get("strategy") if isinstance(obj.get("strategy"), dict) else {}
+        strategy["next_recommended_resolution_status"] = {
+            "recommended_status": "resolved",
+            "title": title_text,
+            "reason": note or obj["final_conclusion"],
+            "action": action_text,
+            "blocked": True,
+        }
+        obj["strategy"] = strategy
+    else:
+        resolved_done = bool((statuses.get("resolved") or {}).get("done"))
+        already_resolved = resolved_done or "resolved" in str(obj.get("final_conclusion", "")).lower()
+        if not already_resolved:
+            obj["current_status_summary"] = label
+            if status_key == "charge_back_initiated":
+                obj["final_conclusion"] = "Charge-back initiated; awaiting bank decision."
+
+    activities = obj.get("activities")
+    if not isinstance(activities, list):
+        activities = []
+    activities.append({
+        "ts": now_iso,
+        "channel": "charge_back",
+        "kind": "status",
+        "title": label,
+        "detail": note or "Charge-back action recorded.",
+        "meta": {"status_key": status_key, **(meta or {})},
+    })
+    obj["activities"] = activities
+
+    con.execute(
+        "UPDATE complaints SET complaint_json=?, updated_at=? WHERE complaint_id=?",
+        (json.dumps(obj, ensure_ascii=False), dt.datetime.utcnow().timestamp(), complaint_id),
+    )
+    con.commit()
+    return True
 
 
 # -----------------------------
@@ -1256,6 +1418,195 @@ def send_gmail_message(gmail_svc, raw_message: str) -> str:
     return msg.get("id", "")
 
 
+TEMPORARY_CREDIT_PATTERNS = [
+    r"temporary\s+credit\s+(?:has\s+been\s+)?issued",
+    r"temporary\s+refund",
+    r"provisional\s+credit",
+    r"credit\s+has\s+been\s+issued",
+    r"while\s+we\s+research\s+your\s+claim",
+    r"claim\s+amount",
+    r"claim\s+opened",
+]
+
+
+def _message_to_search_result(full: Dict[str, Any]) -> GmailSearchMessage:
+    headers = {
+        h.get("name", "").lower(): h.get("value", "")
+        for h in (full.get("payload", {}).get("headers") or [])
+    }
+    from_name, from_email = _parse_from_header(headers.get("from", ""))
+    to_names, to_emails = _parse_address_list(headers.get("to", ""))
+    _cc_names, cc_emails = _parse_address_list(headers.get("cc", ""))
+    return GmailSearchMessage(
+        message_id=full.get("id", ""),
+        thread_id=full.get("threadId", ""),
+        from_name=from_name,
+        from_email=from_email,
+        to_names=to_names,
+        to_emails=to_emails,
+        cc_emails=cc_emails,
+        subject=headers.get("subject", ""),
+        date=headers.get("date", ""),
+        snippet=re.sub(r"\s+", " ", full.get("snippet", "")).strip()[:500],
+        body_excerpt=_decode_gmail_body(full.get("payload") or {}, limit=4000),
+    )
+
+
+def detect_temporary_credit_message(message: GmailSearchMessage, complaint: ComplaintCase) -> Tuple[bool, float, str]:
+    """Detect bank temporary/provisional credit notifications.
+
+    A positive detection means the bank has issued a temporary/provisional
+    credit while investigating the dispute. For Complaint Warrior this is a
+    resolved status, with the caveat that the credit may later be reversed.
+    """
+    haystack = "\n".join([
+        message.subject or "",
+        message.snippet or "",
+        message.body_excerpt or "",
+    ])
+    normalized = haystack.lower()
+    matched = [pat for pat in TEMPORARY_CREDIT_PATTERNS if re.search(pat, normalized, flags=re.I)]
+    if not matched:
+        return False, 0.0, ""
+
+    score = min(1.0, 0.25 + 0.15 * len(matched))
+
+    # Increase confidence if the notice resembles a claim-status message.
+    if re.search(r"claim\s+id", normalized, flags=re.I):
+        score += 0.15
+    if re.search(r"claim\s+opened", normalized, flags=re.I):
+        score += 0.10
+
+    # Increase confidence when amount/merchant hints match the complaint.
+    amount_hint = extract_first_amount(" ".join([complaint.complaint_raw, complaint.final_conclusion]))
+    if amount_hint and amount_hint.replace(",", "") in normalized.replace(",", ""):
+        score += 0.10
+    merchant_hint = infer_merchant_name(complaint).lower()
+    if merchant_hint and merchant_hint in normalized:
+        score += 0.10
+
+    score = min(score, 1.0)
+    reason = "Matched temporary/provisional credit language: " + ", ".join(matched[:4])
+    return score >= 0.45, score, reason
+
+
+def search_temporary_credit_messages(
+    gmail_svc,
+    complaint: ComplaintCase,
+    max_messages: int = 25,
+) -> List[Dict[str, Any]]:
+    query = (
+        '{"temporary credit" "temporary refund" "provisional credit" '
+        '"credit has been issued" "while we research your claim" '
+        '"claim amount" "claim opened"} newer_than:180d'
+    )
+    response = gmail_svc.users().messages().list(
+        userId="me",
+        q=query,
+        maxResults=max(1, min(max_messages, 50)),
+    ).execute()
+
+    matches: List[Dict[str, Any]] = []
+    for ref in response.get("messages", []) or []:
+        full = gmail_svc.users().messages().get(
+            userId="me",
+            id=ref["id"],
+            format="full",
+        ).execute()
+        msg = _message_to_search_result(full)
+        ok, confidence, reason = detect_temporary_credit_message(msg, complaint)
+        if ok:
+            matches.append({
+                "message": msg,
+                "confidence": confidence,
+                "reason": reason,
+            })
+
+    matches.sort(key=lambda x: x["confidence"], reverse=True)
+    return matches
+
+
+def mark_complaint_resolved_by_temporary_credit(
+    con: sqlite3.Connection,
+    complaint: ComplaintCase,
+    match: Dict[str, Any],
+) -> bool:
+    msg: GmailSearchMessage = match["message"]
+    detail = (
+        "Temporary/provisional credit detected in bank email. "
+        f"Subject: {msg.subject}. Date: {msg.date}. "
+        f"Confidence: {match.get('confidence', 0):.2f}. "
+        "Complaint treated as resolved unless the bank later reverses the credit."
+    )
+    return update_native_complaint_module_status_conn(
+        con,
+        complaint.complaint_id,
+        "charge_back_temporary_credit",
+        note=detail,
+        meta={
+            "source": "charge_back_temporary_credit_detector",
+            "gmail_message_id": msg.message_id,
+            "gmail_thread_id": msg.thread_id,
+            "subject": msg.subject,
+            "date": msg.date,
+            "confidence": match.get("confidence", 0),
+            "reason": match.get("reason", ""),
+        },
+    )
+
+
+def get_native_module_statuses(con: sqlite3.Connection, complaint_id: str) -> Dict[str, Any]:
+    """Read latest module_statuses directly from complaints.complaint_json."""
+    row = con.execute(
+        "SELECT complaint_json FROM complaints WHERE complaint_id=? LIMIT 1",
+        (complaint_id,),
+    ).fetchone()
+    if not row:
+        return {}
+    obj = _cw_json_loads_safe(row[0])
+    statuses = obj.get("module_statuses")
+    return statuses if isinstance(statuses, dict) else {}
+
+
+def render_chargeback_status_panel(con: sqlite3.Connection, complaint: ComplaintCase) -> None:
+    """Display charge-back progress explicitly on the Charge Back form."""
+    statuses = get_native_module_statuses(con, complaint.complaint_id)
+
+    def done(key: str) -> bool:
+        value = statuses.get(key) or {}
+        return bool(value.get("done")) if isinstance(value, dict) else bool(value)
+
+    def note(key: str) -> str:
+        value = statuses.get(key) or {}
+        if isinstance(value, dict):
+            return str(value.get("note") or "")
+        return ""
+
+    initiated = done("charge_back_initiated")
+    temporary_credit = done("charge_back_temporary_credit")
+    won = done("charge_back_won")
+    resolved = done("resolved")
+
+    st.subheader("Charge-back status")
+    if won:
+        st.success("✅ Charge-back won / permanent credit issued. Complaint is resolved.")
+    elif temporary_credit:
+        st.success("✅ Charge-back request successful: temporary/provisional credit issued. Complaint is marked resolved while the bank researches the claim.")
+    elif initiated:
+        st.info("⏳ Charge-back request submitted. Waiting for bank decision or temporary credit notice.")
+    elif resolved:
+        st.success("✅ Complaint is already marked resolved.")
+    else:
+        st.warning("No charge-back request has been recorded for this complaint yet.")
+
+    rows = [
+        {"Step": "Charge-back submitted", "Status": "✅ Done" if initiated or temporary_credit or won else "⬜ Not recorded", "Note": note("charge_back_initiated")},
+        {"Step": "Temporary/provisional credit issued", "Status": "✅ Done" if temporary_credit else "⬜ Not detected", "Note": note("charge_back_temporary_credit")},
+        {"Step": "Final charge-back won", "Status": "✅ Done" if won else "⬜ Not recorded", "Note": note("charge_back_won")},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 # -----------------------------
 # Draft generation
 # -----------------------------
@@ -1332,15 +1683,115 @@ def init_state() -> None:
     st.session_state.setdefault("recipient_source", "manual")
     st.session_state.setdefault("transaction_card_bank", "")
     st.session_state.setdefault("confirm_card_bank_match", False)
+    st.session_state.setdefault("selected_user_email", "")
+    st.session_state.setdefault("selected_complaint_id", "")
+
+
+def _case_label(case: ComplaintCase) -> str:
+    title = (case.subject or "").strip() or "(no subject)"
+    created = case.created_at[:10] if case.created_at else "unknown date"
+    status = (case.current_status_summary or "").strip() or "no status"
+    return f"{case.complaint_id} — {title} — {created} — {status}"
+
+
+def _case_grid_df(cases: Sequence[ComplaintCase]):
+    return [
+        {
+            "complaint_id": c.complaint_id,
+            "title": c.subject or "(no subject)",
+            "status": c.current_status_summary or "",
+            "conclusion": c.final_conclusion or "",
+            "created_at": c.created_at,
+            "user_email": c.user_email,
+        }
+        for c in cases
+    ]
+
+
+def render_mandatory_user_filter(cases: Sequence[ComplaintCase]) -> List[ComplaintCase]:
+    """Require the user to type their own Complaint Warrior email.
+
+    Privacy rule: never display a dropdown/list of all user emails.
+    No complaint rows are shown until the typed email is applied as an exact
+    owner filter.
+    """
+    st.subheader("1) Enter your Complaint Warrior email")
+    current = st.session_state.get("selected_user_email", "")
+    typed = st.text_input(
+        "Your email",
+        value=current,
+        placeholder="you@example.com",
+        help="Only complaints whose owner email exactly matches this value will be shown.",
+    ).strip().lower()
+
+    if typed != current:
+        st.session_state.selected_user_email = typed
+        st.session_state.selected_complaint_id = ""
+        st.session_state.gmail_search_results = []
+        st.session_state.banker_selection = {}
+        st.session_state.recipient_name = ""
+        st.session_state.recipient_email = ""
+        st.session_state.recipient_source = "manual"
+        st.rerun()
+
+    if not typed:
+        st.warning("Enter your Complaint Warrior email. No complaints are shown until this field is filled.")
+        return []
+
+    filtered = [c for c in cases if (c.user_email or "").strip().lower() == typed]
+    if not filtered:
+        st.warning("No complaints found for this email. Nothing else is displayed.")
+        return []
+
+    st.success(f"Loaded {len(filtered)} complaint(s) for {typed}.")
+    return filtered
 
 
 def render_case_picker(cases: Sequence[ComplaintCase]) -> ComplaintCase:
-    lookup = {
-        f"{c.complaint_id} | {c.subject or '(no subject)'} | {c.created_at[:10] if c.created_at else 'unknown'}": c
-        for c in cases
-    }
-    selected_label = st.selectbox("Complaint", list(lookup.keys()))
-    return lookup[selected_label]
+    st.subheader("2) Select complaint")
+    if not cases:
+        raise RuntimeError("No complaints available for the selected user.")
+
+    # Grid selection. In recent Streamlit versions, clicking a row updates selection.
+    # Double-clicking a cell/row also selects the row in the dataframe UI.
+    grid_df = _case_grid_df(cases)
+    selected_from_grid = None
+    grid_event = st.dataframe(
+        grid_df,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="complaint_grid",
+    )
+    try:
+        rows = grid_event.selection.rows
+        if rows:
+            selected_from_grid = cases[int(rows[0])].complaint_id
+    except Exception:
+        selected_from_grid = None
+
+    if selected_from_grid and selected_from_grid != st.session_state.get("selected_complaint_id"):
+        st.session_state.selected_complaint_id = selected_from_grid
+
+    labels = [_case_label(c) for c in cases]
+    by_label = {label: c for label, c in zip(labels, cases)}
+    ids = [c.complaint_id for c in cases]
+
+    current_id = st.session_state.get("selected_complaint_id") or ids[0]
+    if current_id not in ids:
+        current_id = ids[0]
+    current_label = labels[ids.index(current_id)]
+
+    selected_label = st.selectbox(
+        "Complaint",
+        labels,
+        index=labels.index(current_label),
+        help="Shows complaint ID, title, date, and current status.",
+    )
+    selected_case = by_label[selected_label]
+    st.session_state.selected_complaint_id = selected_case.complaint_id
+    return selected_case
 
 
 def get_token_key_options(token_db_path: Path) -> List[str]:
@@ -1417,7 +1868,13 @@ def app_main() -> None:
         st.warning("No complaints found in the Complaint Warrior database.")
         return
 
-    complaint = render_case_picker(cases)
+    user_cases = render_mandatory_user_filter(cases)
+    if not user_cases:
+        return
+
+    complaint = render_case_picker(user_cases)
+
+    render_chargeback_status_panel(con, complaint)
 
     c1, c2 = st.columns([1.25, 1.0])
     with c1:
@@ -1436,6 +1893,49 @@ def app_main() -> None:
                     st.caption(f"{row['updated_at']} | {row['subject']}")
         else:
             st.caption("No saved charge-back outreach yet.")
+
+    st.subheader("Check for temporary refund / temporary credit")
+    st.caption(
+        "Looks in your Gmail for bank notices such as 'Temporary credit has been issued', "
+        "'temporary refund', or 'provisional credit'. If found, the main Complaint Warrior "
+        "status is set to Resolved."
+    )
+    if st.button("Check Gmail for temporary credit and mark resolved if found"):
+        try:
+            gmail_svc, _people_svc, _scope_info = build_services(
+                token_db_path=Path(st.session_state.token_db_path),
+                token_key=st.session_state.token_key,
+                credentials_path=Path(st.session_state.credentials_path),
+                token_path=Path(st.session_state.token_path),
+            )
+            matches = search_temporary_credit_messages(gmail_svc, complaint)
+            if not matches:
+                st.info("No temporary/provisional credit notice was found in Gmail for the last 180 days.")
+            else:
+                best = matches[0]
+                status_updated = mark_complaint_resolved_by_temporary_credit(con, complaint, best)
+                msg = best["message"]
+                if status_updated:
+                    st.success(
+                        "Charge-back request successful: temporary/provisional credit detected. Complaint Warrior status was set to Resolved."
+                    )
+                    st.write({
+                        "subject": msg.subject,
+                        "date": msg.date,
+                        "from": f"{msg.from_name} <{msg.from_email}>",
+                        "confidence": round(float(best.get("confidence", 0)), 2),
+                        "reason": best.get("reason", ""),
+                    })
+                    with st.expander("Matched email excerpt", expanded=False):
+                        st.write((msg.body_excerpt or msg.snippet or "")[:2000])
+                    st.rerun()
+                else:
+                    st.warning("Temporary credit/refund was detected, but Complaint Warrior status could not be updated.")
+        except TokenRefreshError as exc:
+            st.error(str(exc))
+            st.info("Use the sidebar re-authorization button and try again.")
+        except Exception as exc:
+            st.error(f"Could not check Gmail for temporary credit/refund: {exc}")
 
     inferred_bank = infer_bank_name(complaint)
     inferred_domain = infer_bank_domain(inferred_bank)
@@ -1694,6 +2194,23 @@ def app_main() -> None:
                         gmail_draft_id=draft_id,
                         notes={"cc": cc_email, "token_key": st.session_state.token_key, "card_bank_verification": asdict(card_verification)},
                     )
+                    status_updated = update_native_complaint_module_status_conn(
+                        con,
+                        complaint.complaint_id,
+                        "charge_back_initiated",
+                        note=f"Charge-back Gmail draft created for {recipient_email}.",
+                        meta={
+                            "bank_name": bank_name,
+                            "recipient_email": recipient_email,
+                            "gmail_draft_id": draft_id,
+                            "transaction_amount": transaction_amount,
+                            "merchant_name": merchant_name,
+                        },
+                    )
+                    if status_updated:
+                        st.info("Main Complaint Warrior status updated: Charge-back initiated.")
+                    else:
+                        st.warning("Charge-back record saved, but main Complaint Warrior status was not updated.")
                     st.success(f"Created Gmail draft: {draft_id}")
                 except TokenRefreshError as exc:
                     st.error(str(exc))
@@ -1744,6 +2261,23 @@ def app_main() -> None:
                         gmail_message_id=message_id,
                         notes={"cc": cc_email, "token_key": st.session_state.token_key, "card_bank_verification": asdict(card_verification)},
                     )
+                    status_updated = update_native_complaint_module_status_conn(
+                        con,
+                        complaint.complaint_id,
+                        "charge_back_initiated",
+                        note=f"Charge-back email sent to {recipient_email}.",
+                        meta={
+                            "bank_name": bank_name,
+                            "recipient_email": recipient_email,
+                            "gmail_message_id": message_id,
+                            "transaction_amount": transaction_amount,
+                            "merchant_name": merchant_name,
+                        },
+                    )
+                    if status_updated:
+                        st.info("Main Complaint Warrior status updated: Charge-back initiated.")
+                    else:
+                        st.warning("Charge-back email sent, but main Complaint Warrior status was not updated.")
                     st.success(f"Sent email. Gmail message id: {message_id}")
                 except TokenRefreshError as exc:
                     st.error(str(exc))

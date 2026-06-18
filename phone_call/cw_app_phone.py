@@ -15,6 +15,7 @@ from complaint_manager_phone import (
     AUTO_SEND_POLICIES,
     TEST_INBOX_EMAIL,
     COMPLAINT_MODULE_STATUSES,
+    outbound_email_mode_label,
 )
 
 APP_TITLE = "Complaint Warrior"
@@ -24,6 +25,33 @@ LOGO_PATH = os.environ.get("CW_LOGO_PATH", "complaint_warrior.png")
 
 
 def _log(msg: str):
+    """Append only useful workflow messages to the visible Decision / processor log.
+
+    Infrastructure messages such as Gmail token switching and active-user loading
+    are useful for debugging server logs, but they clutter the user-facing CW log.
+    """
+    msg = str(msg or "").strip()
+    if not msg:
+        return
+
+    noisy_prefixes = (
+        "[manager] switched gmail token key",
+        "[manager] active app user=",
+        "[manager] complaints_loaded=",
+        "[gmail]",
+        "[token]",
+        "[oauth]",
+    )
+    if any(msg.startswith(prefix) for prefix in noisy_prefixes):
+        return
+
+    noisy_contains = (
+        "switched gmail token key",
+        "complaints_loaded=",
+    )
+    if any(fragment in msg for fragment in noisy_contains):
+        return
+
     if "logs" not in st.session_state:
         st.session_state.logs = []
     st.session_state.logs.append(msg)
@@ -210,6 +238,8 @@ def main():
     )
     with st.sidebar:
         st.header("Gmail")
+        st.info(outbound_email_mode_label())
+        st.caption(outbound_email_mode_label())
         if PUBLIC_BASE:
             st.markdown(f"[Connect Gmail]({PUBLIC_BASE}/auth/start)")
             st.caption("First time setup")
@@ -274,8 +304,13 @@ def main():
 
         your_name = st.text_input("Your name", value="Boris Galitsky")
         company_name = st.text_input("Company name", value="")
-        subject = st.text_input("Subject", value="Complaint regarding missed connection and reimbursement")
-        raw = st.text_area("Describe the complaint", height=180, value="My first flight was delayed, I missed my connection, and I had to pay for hotel and meals. I request reimbursement of those costs.")
+        company_email = st.text_input(
+            "Company / business email",
+            value="",
+            help="Production sends to this email. In non-production/debug directories, emails are redirected to bgalitsky@hotmail.com.",
+        ).strip().lower()
+        subject = st.text_input("Subject", value="Edit: Complaint regarding ...")
+        raw = st.text_area("Describe the complaint", height=180, value="Specify your complaint so that we can find the contacts for the company")
 
         policy_default = "auto_send" if (st.session_state.mode == "automated" and st.session_state.trusted) else "manual"
         auto_policy = st.selectbox("Communication policy", list(AUTO_SEND_POLICIES), index=list(AUTO_SEND_POLICIES).index(policy_default))
@@ -289,6 +324,8 @@ def main():
                     user_email=st.session_state.app_user_email,
                     user_name=your_name,
                     auto_send_policy=auto_policy,
+                    company_name=company_name,
+                    company_email=company_email,
                 )
 
                 st.session_state.selected_complaint_id = cs.complaint_id
@@ -400,6 +437,9 @@ def main():
             st.caption("Conclusion")
             st.write(cs.final_conclusion or "Open")
 
+        if getattr(cs, "company_email", ""):
+            st.caption(f"Business email for production sends: {cs.company_email}")
+
         st.markdown("#### Module resolution status")
         module_statuses = _normalize_module_statuses(getattr(cs, "module_statuses", {}))
         status_cols = st.columns(min(5, max(1, len(module_statuses))))
@@ -474,6 +514,19 @@ def main():
             selected_idx = [int(x.split("]")[0][1:]) for x in picked]
             if selected_idx:
                 st.text_area("Draft preview", value=drafts[selected_idx[0]].get("body", ""), height=220)
+                try:
+                    route = st.session_state.manager.get_outbound_recipient_preview(cid, tid, selected_idx[0])
+                    actual = route.get("actual_recipient") or "[blocked / missing]"
+                    intended = route.get("intended_recipient") or "[not found]"
+                    mode = route.get("deployment_mode") or "unknown"
+                    if route.get("error"):
+                        st.error(f"Email send target: {route.get('error')}")
+                    elif route.get("test_redirect"):
+                        st.warning(f"Email will be sent to {actual} (debug mode). Intended business email: {intended}.")
+                    else:
+                        st.success(f"Email will be sent to business recipient: {actual} (mode: {mode}).")
+                except Exception as e:
+                    st.warning(f"Could not preview email target: {e}")
 
         with b2:
             if st.button("Send selected drafts", disabled=actions_paused):
@@ -485,7 +538,23 @@ def main():
                     st.error(str(e))
 
         st.subheader("4) Phone contact")
-        if st.button("Call company now", disabled=actions_paused):
+        phone_button_label = "Call company now"
+        try:
+            phone_followup = st.session_state.manager.get_phone_followup_status(cid, tid, days_without_reply=3, max_attempts=2)
+            if phone_followup.get("due"):
+                phone_button_label = "Need to call now"
+                st.warning(
+                    f"No email reply for {phone_followup.get('days_without_reply', 0):.1f} days after the last sent email. "
+                    f"Phone follow-up is due. Attempts used: {phone_followup.get('attempts', 0)}/2."
+                )
+            else:
+                reason = phone_followup.get("reason") or ""
+                if reason:
+                    st.caption(reason)
+        except Exception as e:
+            st.caption(f"Phone follow-up check unavailable: {e}")
+
+        if st.button(phone_button_label, disabled=actions_paused):
             try:
                 reply = st.session_state.manager.place_phone_call_and_capture_reply(cid, tid)
                 if reply and reply.strip():
