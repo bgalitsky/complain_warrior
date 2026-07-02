@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
+import os
 import re
 import sqlite3
 import tempfile
@@ -52,6 +54,61 @@ OFFICIAL_SC100_URL = "https://courts.ca.gov/sites/default/files/courts/default/2
 SMALL_CLAIMS_HELP_URL = "https://selfhelp.courts.ca.gov/small-claims/start-case/forms/fill-out-forms"
 SERVE_URL = "https://selfhelp.courts.ca.gov/small-claims/start-case/serve"
 FILE_URL = "https://selfhelp.courts.ca.gov/small-claims/start-case/file"
+
+
+EFILE_PROVIDER_DIRECTORY_URL = "https://www.odysseyefileca.com/service-providers.htm"
+EFILE_ACTIVE_COURTS_URL = "https://www.odysseyefileca.com/active-courts.htm"
+EFILE_ROUTE_VERIFIED_DATE = "2026-07-01"
+
+# Conservative allow-list for the application's assisted e-filing workflow.
+# A county is included only when its public court materials identify Small Claims
+# as an electronically fileable case type. The app still requires a live check
+# at submission time because courts can exclude individual filing codes.
+CONFIRMED_CA_SMALL_CLAIMS_EFILE_COUNTIES = {
+    "Alameda", "Butte", "Calaveras", "Contra Costa", "El Dorado", "Fresno",
+    "Imperial", "Inyo", "Kern", "Kings", "Lake", "Los Angeles", "Madera",
+    "Marin", "Mendocino", "Mono", "Monterey", "Nevada", "Orange", "Placer",
+    "Riverside", "Sacramento", "San Benito", "San Bernardino", "San Joaquin",
+    "San Luis Obispo", "Santa Clara", "Santa Cruz", "Siskiyou", "Stanislaus",
+    "Tulare", "Ventura", "Yolo", "Yuba",
+}
+
+ODYSSEY_EFILECA_COUNTIES = {
+    "Alameda", "Butte", "Calaveras", "Contra Costa", "Fresno", "Kern", "Kings",
+    "Los Angeles", "Mendocino", "Monterey", "Orange", "San Bernardino",
+    "San Luis Obispo", "Santa Clara", "Santa Cruz", "Stanislaus", "Yolo", "Yuba",
+}
+
+COUNTY_EFILE_INFO_URLS = {
+    "Calaveras": "https://calaveras.courts.ca.gov/online-services/efiling-information",
+    "El Dorado": "https://www.eldorado.courts.ca.gov/online-services/efiling",
+    "Lake": "https://lake.courts.ca.gov/efiling",
+    "Madera": "https://www.madera.courts.ca.gov/online-services/efiling-dvgv-petition-online-case-information",
+    "Marin": "https://www.marin.courts.ca.gov/online-services/efiling",
+    "Placer": "https://www.placer.courts.ca.gov/online-services/efiling",
+    "Riverside": "https://www.riverside.courts.ca.gov/how-file-small-claims",
+    "San Bernardino": "https://sanbernardino.courts.ca.gov/efiling/small-claims-efiling",
+    "Ventura": "https://ventura.courts.ca.gov/online-services/efiling",
+}
+
+EFILE_STATUS_OPTIONS = [
+    "READY_FOR_EFSP",
+    "SUBMITTED_TO_EFSP",
+    "RECEIVED_BY_COURT",
+    "ACCEPTED",
+    "REJECTED",
+    "WITHDRAWN",
+]
+
+FILING_CODE_SUGGESTIONS = {
+    "SC-100": "Plaintiff's Claim and Order to Go to Small Claims Court",
+    "SC-100A": "Other Plaintiffs or Defendants",
+    "SC-103": "Fictitious Business Name declaration",
+    "FW-001": "Request to Waive Court Fees",
+    "FW-003": "Order on Court Fee Waiver",
+    "SC-104": "Proof of Service",
+    "OTHER": "Other small-claims filing; select the exact EFSP filing code",
+}
 
 DEFAULT_TABLE_SYNONYMS: dict[str, list[str]] = {
     "case_id": ["case_id", "id", "complaint_id", "ticket_id", "claim_id"],
@@ -201,6 +258,49 @@ class FilingPacket:
 # -----------------------------
 # Complaint Warrior native status update helper
 # -----------------------------
+
+
+def append_native_complaint_activity_conn(
+    conn: sqlite3.Connection,
+    complaint_id: str,
+    *,
+    title: str,
+    detail: str,
+    kind: str = "status",
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Append a Small Claims activity without falsely changing module status."""
+    if not complaint_id:
+        return False
+    cols = [r[1] for r in conn.execute("PRAGMA table_info('complaints')").fetchall()]
+    if "complaint_id" not in cols or "complaint_json" not in cols:
+        return False
+    row = conn.execute(
+        "SELECT complaint_json FROM complaints WHERE complaint_id=? LIMIT 1",
+        (complaint_id,),
+    ).fetchone()
+    if not row:
+        return False
+    obj = json_loads_safe(row[0])
+    activities = obj.get("activities")
+    if not isinstance(activities, list):
+        activities = []
+    activities.append({
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "channel": "small_claims",
+        "kind": kind,
+        "title": clean_text(title),
+        "detail": clean_text(detail),
+        "meta": meta or {},
+    })
+    obj["activities"] = activities
+    conn.execute(
+        "UPDATE complaints SET complaint_json=?, updated_at=? WHERE complaint_id=?",
+        (json.dumps(obj, ensure_ascii=False), time.time(), complaint_id),
+    )
+    conn.commit()
+    return True
+
 MODULE_STATUS_LABELS = {
     "resolved": "Resolved",
     "social_network_shared": "Social network shared",
@@ -1383,9 +1483,41 @@ def fill_pdf_form(pdf_bytes: bytes, field_value_map: dict[str, str]) -> bytes:
     writer.clone_document_from_reader(reader)
     for page in writer.pages:
         try:
-            writer.update_page_form_field_values(page, field_value_map)
+            # California courts commonly reject PDFs that retain active fillable fields.
+            # pypdf >= 5 supports flatten=True; keep a fallback for earlier versions.
+            try:
+                writer.update_page_form_field_values(
+                    page, field_value_map, auto_regenerate=False, flatten=True
+                )
+            except TypeError:
+                writer.update_page_form_field_values(page, field_value_map)
         except Exception:
             continue
+
+    # pypdf renders field appearances with flatten=True but can retain the
+    # AcroForm/widget dictionaries. Remove those dictionaries after rendering
+    # so the resulting PDF is no longer an interactive form.
+    for page in writer.pages:
+        try:
+            annots = page.get("/Annots")
+            if not annots:
+                continue
+            for idx in range(len(annots) - 1, -1, -1):
+                try:
+                    annot = annots[idx].get_object()
+                    if str(annot.get("/Subtype")) == "/Widget":
+                        del annots[idx]
+                except Exception:
+                    continue
+            if not annots and "/Annots" in page:
+                del page["/Annots"]
+        except Exception:
+            continue
+    try:
+        if "/AcroForm" in writer._root_object:
+            del writer._root_object["/AcroForm"]
+    except Exception:
+        pass
 
     out = io.BytesIO()
     writer.write(out)
@@ -1533,6 +1665,654 @@ def build_download_zip(packet: FilingPacket, filled_pdf: bytes | None = None, pa
             zf.writestr("small_claim_packet.pdf", packet_pdf)
     return zip_buffer.getvalue()
 
+
+
+# -----------------------------
+# California Small Claims e-filing handoff
+# -----------------------------
+
+def get_small_claim_efile_route(county: str) -> dict[str, Any]:
+    county = clean_text(county)
+    supported = county in CONFIRMED_CA_SMALL_CLAIMS_EFILE_COUNTIES
+    platform = "Odyssey eFileCA" if county in ODYSSEY_EFILECA_COUNTIES else "Court-approved EFSP"
+    return {
+        "county": county,
+        "supported": supported,
+        "platform": platform if supported else "Manual / verify with court",
+        "provider_directory_url": EFILE_PROVIDER_DIRECTORY_URL,
+        "court_info_url": COUNTY_EFILE_INFO_URLS.get(county, ""),
+        "verified_on": EFILE_ROUTE_VERIFIED_DATE,
+        "initial_sc100_supported": supported,
+        "live_verification_required": True,
+    }
+
+
+def infer_filing_code(filename: str) -> str:
+    upper = clean_text(filename).upper().replace("_", "-")
+    for code in ["SC-100A", "SC-100", "SC-103", "FW-001", "FW-003", "SC-104"]:
+        if code in upper or code.replace("-", "") in upper.replace("-", ""):
+            return code
+    return "OTHER"
+
+
+def safe_efile_filename(filename: str, fallback: str = "document.pdf") -> str:
+    filename = Path(clean_text(filename) or fallback).name
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._") or "document.pdf"
+    if not stem.lower().endswith(".pdf"):
+        stem += ".pdf"
+    return stem[:120]
+
+
+def validate_efile_pdf(filename: str, data: bytes, max_document_mb: int = 25) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    page_count = 0
+    text_chars = 0
+    field_count = 0
+    encrypted = False
+    metadata_present = False
+
+    if not data or not data.startswith(b"%PDF"):
+        errors.append("The file is not a recognizable PDF.")
+    if len(data) > max_document_mb * 1024 * 1024:
+        errors.append(f"The PDF exceeds the {max_document_mb} MB per-document limit.")
+
+    if not errors and PdfReader is not None:
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            encrypted = bool(reader.is_encrypted)
+            if encrypted:
+                errors.append("Password-protected/encrypted PDFs are not accepted for e-filing.")
+            else:
+                page_count = len(reader.pages)
+                if page_count == 0:
+                    errors.append("The PDF contains no pages.")
+                for page in reader.pages:
+                    try:
+                        text_chars += len(clean_text(page.extract_text()))
+                    except Exception:
+                        pass
+                try:
+                    field_count = len(reader.get_fields() or {})
+                except Exception:
+                    field_count = 0
+                metadata_present = bool(reader.metadata)
+        except Exception as exc:
+            errors.append(f"The PDF could not be parsed: {exc}")
+    elif PdfReader is None:
+        warnings.append("pypdf is unavailable, so structural PDF checks were skipped.")
+
+    if field_count:
+        warnings.append(
+            f"The PDF still contains {field_count} active form field(s). Flatten it before court submission."
+        )
+    if page_count and text_chars < max(20, page_count * 8):
+        warnings.append("Very little searchable text was detected; verify that the PDF is text-searchable/OCR'd.")
+    if metadata_present:
+        warnings.append("PDF metadata is present. Consider sanitizing author/editing metadata before filing.")
+
+    return {
+        "filename": safe_efile_filename(filename),
+        "size_bytes": len(data),
+        "size_mb": round(len(data) / (1024 * 1024), 3),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "pages": page_count,
+        "text_chars": text_chars,
+        "active_form_fields": field_count,
+        "encrypted": encrypted,
+        "errors": errors,
+        "warnings": warnings,
+        "ok": not errors and field_count == 0,
+    }
+
+
+def build_efiling_manifest(
+    packet: FilingPacket,
+    provider_name: str,
+    filing_stage: str,
+    documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    route = get_small_claim_efile_route(packet.sc100.get("county", ""))
+    return {
+        "schema": "complaint-warrior.ca-small-claims-efile.v1",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "route_verified_on": EFILE_ROUTE_VERIFIED_DATE,
+        "complaint_id": packet.sc100.get("case_id"),
+        "county": packet.sc100.get("county"),
+        "court_case_type": "Small Claims",
+        "filing_stage": filing_stage,
+        "provider_name": provider_name,
+        "platform": route["platform"],
+        "plaintiff": {
+            "name": packet.sc100.get("plaintiff_name"),
+            "email": packet.sc100.get("plaintiff_email"),
+            "phone": packet.sc100.get("plaintiff_phone"),
+        },
+        "defendant": {
+            "legal_name": packet.sc100.get("defendant_legal_name"),
+            "agent_for_service": packet.sc100.get("agent_for_service"),
+        },
+        "amount": packet.sc100.get("amount"),
+        "documents": [
+            {
+                "filename": d["filename"],
+                "filing_code_suggestion": d["filing_code"],
+                "filing_description": FILING_CODE_SUGGESTIONS.get(d["filing_code"], FILING_CODE_SUGGESTIONS["OTHER"]),
+                "sha256": d["validation"]["sha256"],
+                "size_bytes": d["validation"]["size_bytes"],
+                "pages": d["validation"]["pages"],
+            }
+            for d in documents
+        ],
+        "attestations_required": [
+            "The filer reviewed all facts and signatures.",
+            "The filer selected the exact EFSP filing code and security level.",
+            "Confidential identifiers were removed or redacted.",
+            "The selected county and courthouse are proper venue.",
+        ],
+    }
+
+
+def build_efiling_handoff_zip(manifest: dict[str, Any], documents: list[dict[str, Any]]) -> bytes:
+    readme = textwrap.dedent(
+        f"""
+        California Small Claims e-filing handoff
+
+        Complaint ID: {manifest.get('complaint_id', '')}
+        County: {manifest.get('county', '')}
+        Filing stage: {manifest.get('filing_stage', '')}
+        Suggested provider/platform: {manifest.get('provider_name', '')} / {manifest.get('platform', '')}
+
+        Steps:
+        1. Open the court-approved EFSP/provider directory.
+        2. Create or sign into an EFSP account.
+        3. Start a Small Claims filing in the county shown above.
+        4. Upload each PDF separately when it needs its own file stamp.
+        5. Select the exact filing code in the EFSP; manifest codes are suggestions only.
+        6. Review fees, service options, privacy/security level, and submit.
+        7. Return to Complaint Warrior and record the EFSP envelope/transaction number.
+
+        Do not email these PDFs to a clerk unless that court expressly instructs you to do so.
+        """
+    ).strip()
+    out = io.BytesIO()
+    used: set[str] = set()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("efile_manifest.json", json_bytes(manifest))
+        zf.writestr("README_EFILE.txt", text_bytes(readme))
+        for idx, doc in enumerate(documents, start=1):
+            base = safe_efile_filename(doc["filename"], f"document_{idx}.pdf")
+            name = base
+            suffix = 2
+            while name.lower() in used:
+                name = f"{Path(base).stem}_{suffix}.pdf"
+                suffix += 1
+            used.add(name.lower())
+            zf.writestr(f"documents/{idx:02d}_{name}", doc["data"])
+    return out.getvalue()
+
+
+def ensure_small_claim_efilings_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS small_claim_efilings (
+            filing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            complaint_id TEXT NOT NULL,
+            packet_id INTEGER,
+            county TEXT NOT NULL,
+            filing_stage TEXT NOT NULL,
+            provider_name TEXT,
+            provider_url TEXT,
+            platform TEXT,
+            status TEXT NOT NULL,
+            envelope_reference TEXT,
+            court_case_number TEXT,
+            rejection_reason TEXT,
+            manifest_json TEXT NOT NULL,
+            handoff_zip BLOB,
+            receipt_pdf BLOB,
+            provider_response_json TEXT,
+            submitted_at REAL,
+            accepted_at REAL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_small_claim_efilings_case ON small_claim_efilings(complaint_id, updated_at DESC)"
+    )
+    conn.commit()
+
+
+def create_efiling_record(
+    conn: sqlite3.Connection,
+    *,
+    manifest: dict[str, Any],
+    handoff_zip: bytes,
+    provider_url: str,
+    status: str = "READY_FOR_EFSP",
+    provider_response: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    ensure_small_claim_efilings_table(conn)
+    now = time.time()
+    packet_id = None
+    if table_exists(conn, "small_claim_packets"):
+        row = conn.execute(
+            "SELECT packet_id FROM small_claim_packets WHERE complaint_id=? ORDER BY is_latest DESC, saved_at DESC LIMIT 1",
+            (clean_text(manifest.get("complaint_id")),),
+        ).fetchone()
+        packet_id = row[0] if row else None
+    submitted_at = now if status in {"SUBMITTED_TO_EFSP", "RECEIVED_BY_COURT", "ACCEPTED"} else None
+    accepted_at = now if status == "ACCEPTED" else None
+    cur = conn.execute(
+        """
+        INSERT INTO small_claim_efilings (
+            complaint_id, packet_id, county, filing_stage, provider_name, provider_url,
+            platform, status, manifest_json, handoff_zip, provider_response_json,
+            submitted_at, accepted_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            clean_text(manifest.get("complaint_id")), packet_id, clean_text(manifest.get("county")),
+            clean_text(manifest.get("filing_stage")), clean_text(manifest.get("provider_name")),
+            provider_url, clean_text(manifest.get("platform")), status,
+            json.dumps(manifest, ensure_ascii=False), handoff_zip,
+            json.dumps(provider_response or {}, ensure_ascii=False), submitted_at, accepted_at, now, now,
+        ),
+    )
+    conn.commit()
+    return {"filing_id": cur.lastrowid, "status": status, "created_at": now}
+
+
+def latest_efiling_record(conn: sqlite3.Connection, complaint_id: str) -> Optional[dict[str, Any]]:
+    if not table_exists(conn, "small_claim_efilings"):
+        return None
+    row = conn.execute(
+        "SELECT * FROM small_claim_efilings WHERE complaint_id=? ORDER BY updated_at DESC LIMIT 1",
+        (complaint_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_efiling_record(
+    conn: sqlite3.Connection,
+    filing_id: int,
+    *,
+    status: str,
+    provider_name: str = "",
+    envelope_reference: str = "",
+    court_case_number: str = "",
+    rejection_reason: str = "",
+    receipt_pdf: Optional[bytes] = None,
+) -> None:
+    if status not in EFILE_STATUS_OPTIONS:
+        raise ValueError(f"Unsupported e-filing status: {status}")
+    now = time.time()
+    submitted_at = now if status in {"SUBMITTED_TO_EFSP", "RECEIVED_BY_COURT", "ACCEPTED"} else None
+    accepted_at = now if status == "ACCEPTED" else None
+    conn.execute(
+        """
+        UPDATE small_claim_efilings
+        SET status=?, provider_name=COALESCE(NULLIF(?, ''), provider_name),
+            envelope_reference=?, court_case_number=?, rejection_reason=?,
+            receipt_pdf=COALESCE(?, receipt_pdf),
+            submitted_at=COALESCE(submitted_at, ?), accepted_at=COALESCE(accepted_at, ?),
+            updated_at=?
+        WHERE filing_id=?
+        """,
+        (
+            status, provider_name, envelope_reference, court_case_number, rejection_reason,
+            receipt_pdf, submitted_at, accepted_at, now, filing_id,
+        ),
+    )
+    conn.commit()
+
+
+def configured_efsp_api() -> dict[str, str]:
+    return {
+        "url": clean_text(os.getenv("CW_EFSP_API_URL")),
+        "token": clean_text(os.getenv("CW_EFSP_API_TOKEN")),
+        "provider_name": clean_text(os.getenv("CW_EFSP_PROVIDER_NAME")) or "Configured EFSP API",
+    }
+
+
+def submit_to_configured_efsp(
+    manifest: dict[str, Any], documents: list[dict[str, Any]]
+) -> dict[str, Any]:
+    cfg = configured_efsp_api()
+    if not cfg["url"]:
+        raise RuntimeError("CW_EFSP_API_URL is not configured.")
+    if requests is None:
+        raise RuntimeError("The requests package is unavailable.")
+    headers = {"Accept": "application/json"}
+    if cfg["token"]:
+        headers["Authorization"] = f"Bearer {cfg['token']}"
+    files = [
+        ("documents", (d["filename"], d["data"], "application/pdf"))
+        for d in documents
+    ]
+    response = requests.post(
+        cfg["url"],
+        headers=headers,
+        data={"metadata": json.dumps(manifest, ensure_ascii=False)},
+        files=files,
+        timeout=90,
+    )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {"text": response.text[:4000]}
+    if not isinstance(payload, dict):
+        payload = {"response": payload}
+    payload["http_status"] = response.status_code
+    return payload
+
+
+def efiling_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Optional[str]) -> None:
+    st.subheader("5) California Small Claims e-file submission")
+    county = clean_text(packet.sc100.get("county"))
+    route = get_small_claim_efile_route(county)
+
+    if not county:
+        st.error("Select a filing county in Intake and regenerate the packet before e-filing.")
+        return
+    if not route["supported"]:
+        st.warning(
+            f"{county} County is not in this app's confirmed Small Claims e-filing allow-list. "
+            "Use mail/in-person filing or verify the exact filing route with the court."
+        )
+        if route["court_info_url"]:
+            st.link_button("Open county filing information", route["court_info_url"])
+        return
+
+    st.success(
+        f"{county} County is enabled for the assisted e-filing workflow via {route['platform']}. "
+        f"Registry last checked {route['verified_on']}."
+    )
+    st.warning(
+        "This is an EFSP handoff, not email-to-court filing. Confirm that the initial SC-100 filing code "
+        "is currently available in the selected EFSP before paying and submitting."
+    )
+
+    link_col1, link_col2 = st.columns(2)
+    with link_col1:
+        st.link_button("Open approved EFSP directory", route["provider_directory_url"], use_container_width=True)
+    with link_col2:
+        if route["court_info_url"]:
+            st.link_button("Open county e-filing instructions", route["court_info_url"], use_container_width=True)
+        else:
+            st.link_button("Open eFileCA active-court information", EFILE_ACTIVE_COURTS_URL, use_container_width=True)
+
+    filing_stage = st.selectbox(
+        "Filing stage",
+        ["INITIAL_SC100", "SUBSEQUENT_SMALL_CLAIMS_FILING"],
+        format_func=lambda x: "Open a new case with SC-100" if x == "INITIAL_SC100" else "File into an existing small-claims case",
+        key=f"efile_stage_{packet.sc100.get('case_id')}",
+    )
+    provider_options = [
+        "Choose an approved EFSP from the directory",
+        "Odyssey eFileCA / File & Serve provider",
+        "Other court-approved EFSP",
+    ]
+    cfg = configured_efsp_api()
+    if cfg["url"]:
+        provider_options.append(cfg["provider_name"])
+    provider_name = st.selectbox(
+        "Provider / submission route",
+        provider_options,
+        key=f"efile_provider_{packet.sc100.get('case_id')}",
+    )
+
+    st.markdown("#### Filing PDFs")
+    st.caption(
+        "Use the flattened official SC-100 as the lead document. Add each other official form separately "
+        "when it needs its own file stamp (for example, FW-001)."
+    )
+    use_generated = st.checkbox(
+        "Include the populated SC-100 generated in Downloads",
+        value=True,
+        key=f"efile_use_generated_{packet.sc100.get('case_id')}",
+    )
+    uploaded_lead = st.file_uploader(
+        "Upload lead SC-100 PDF instead (optional)",
+        type=["pdf"],
+        key=f"efile_lead_{packet.sc100.get('case_id')}",
+    )
+    extra_uploads = st.file_uploader(
+        "Additional official PDFs (SC-100A, SC-103, FW-001, local forms)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key=f"efile_extra_{packet.sc100.get('case_id')}",
+    )
+
+    raw_docs: list[tuple[str, bytes]] = []
+    if uploaded_lead is not None:
+        raw_docs.append((safe_efile_filename(uploaded_lead.name, "SC-100.pdf"), uploaded_lead.getvalue()))
+    elif use_generated and isinstance(st.session_state.get("filled_sc100_pdf"), (bytes, bytearray)):
+        raw_docs.append((f"SC-100_{packet.sc100.get('case_id')}.pdf", bytes(st.session_state["filled_sc100_pdf"])))
+    for upload in extra_uploads or []:
+        raw_docs.append((safe_efile_filename(upload.name), upload.getvalue()))
+
+    documents: list[dict[str, Any]] = []
+    for name, data in raw_docs:
+        validation = validate_efile_pdf(name, data)
+        documents.append({
+            "filename": validation["filename"],
+            "data": data,
+            "filing_code": infer_filing_code(name),
+            "validation": validation,
+        })
+
+    if documents:
+        validation_rows = []
+        for doc in documents:
+            v = doc["validation"]
+            validation_rows.append({
+                "file": doc["filename"],
+                "code suggestion": doc["filing_code"],
+                "pages": v["pages"],
+                "MB": v["size_mb"],
+                "active fields": v["active_form_fields"],
+                "result": "OK" if v["ok"] else "Needs attention",
+                "errors": "; ".join(v["errors"]),
+                "warnings": "; ".join(v["warnings"]),
+            })
+        st.dataframe(pd.DataFrame(validation_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("Generate/populate an SC-100 PDF in Downloads or upload the lead PDF here.")
+
+    total_size = sum(len(d["data"]) for d in documents)
+    all_valid = bool(documents) and all(d["validation"]["ok"] for d in documents)
+    if total_size > 50 * 1024 * 1024:
+        st.error("The combined envelope exceeds 50 MB; split or reduce the PDFs.")
+        all_valid = False
+    if filing_stage == "INITIAL_SC100" and not any(d["filing_code"] == "SC-100" for d in documents):
+        st.error("An initial filing must include an SC-100 lead document.")
+        all_valid = False
+
+    manifest = build_efiling_manifest(packet, provider_name, filing_stage, documents) if documents else None
+    handoff_zip = build_efiling_handoff_zip(manifest, documents) if manifest else None
+    if handoff_zip:
+        st.download_button(
+            "Download EFSP-ready ZIP",
+            data=handoff_zip,
+            file_name=f"efile_handoff_{packet.sc100.get('case_id')}_{county}.zip",
+            mime="application/zip",
+            type="primary",
+            disabled=not all_valid,
+        )
+
+    attested = st.checkbox(
+        "I reviewed the defendant name/address, venue, signatures, redactions, document codes, and filing fee.",
+        key=f"efile_attest_{packet.sc100.get('case_id')}",
+    )
+
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        if st.button(
+            "Save EFSP handoff record",
+            disabled=not (all_valid and attested and manifest and handoff_zip),
+            key=f"efile_save_handoff_{packet.sc100.get('case_id')}",
+        ):
+            info = create_efiling_record(
+                conn,
+                manifest=manifest,
+                handoff_zip=handoff_zip,
+                provider_url=route["provider_directory_url"],
+                status="READY_FOR_EFSP",
+            )
+            append_native_complaint_activity_conn(
+                conn,
+                clean_text(packet.sc100.get("case_id")),
+                title="EFSP handoff prepared",
+                detail=f"E-filing handoff #{info['filing_id']} prepared for {county} County; not yet submitted.",
+                kind="prepared",
+                meta={"filing_id": info["filing_id"], "status": info["status"]},
+            )
+            st.session_state[f"latest_efiling_id_{packet.sc100.get('case_id')}"] = info["filing_id"]
+            st.success(f"E-filing handoff #{info['filing_id']} saved. The case is not marked submitted yet.")
+
+    with action_col2:
+        api_selected = cfg["url"] and provider_name == cfg["provider_name"]
+        if st.button(
+            "Submit through configured EFSP API",
+            disabled=not (api_selected and all_valid and attested and manifest and handoff_zip),
+            key=f"efile_api_submit_{packet.sc100.get('case_id')}",
+        ):
+            try:
+                response_payload = submit_to_configured_efsp(manifest, documents)
+                info = create_efiling_record(
+                    conn,
+                    manifest=manifest,
+                    handoff_zip=handoff_zip,
+                    provider_url=cfg["url"],
+                    status="SUBMITTED_TO_EFSP",
+                    provider_response=response_payload,
+                )
+                envelope_ref = clean_text(
+                    response_payload.get("envelope_reference")
+                    or response_payload.get("envelope_id")
+                    or response_payload.get("transaction_id")
+                )
+                if envelope_ref:
+                    update_efiling_record(
+                        conn,
+                        info["filing_id"],
+                        status="SUBMITTED_TO_EFSP",
+                        provider_name=cfg["provider_name"],
+                        envelope_reference=envelope_ref,
+                    )
+                update_native_complaint_module_status_conn(
+                    conn,
+                    clean_text(packet.sc100.get("case_id")),
+                    "submitted_to_small_claim_court",
+                    note=f"Submitted through {cfg['provider_name']}; e-filing record #{info['filing_id']}. Envelope: {envelope_ref or 'pending' }.",
+                    meta={"filing_id": info["filing_id"], "envelope_reference": envelope_ref},
+                )
+                st.success(f"Submitted through the configured API. Filing record #{info['filing_id']} created.")
+                st.json(response_payload)
+            except Exception as exc:
+                st.error(f"EFSP API submission failed: {exc}")
+
+    latest = latest_efiling_record(conn, clean_text(packet.sc100.get("case_id")))
+    if latest:
+        st.markdown("#### Record EFSP receipt or court result")
+        st.caption(
+            f"Latest filing record #{latest['filing_id']} — {latest['status']} — "
+            f"updated {datetime.fromtimestamp(latest['updated_at']).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            receipt_provider = st.text_input(
+                "Actual EFSP/provider name",
+                value=clean_text(latest.get("provider_name")),
+                key=f"efile_receipt_provider_{latest['filing_id']}",
+            )
+            envelope_reference = st.text_input(
+                "EFSP envelope / transaction number",
+                value=clean_text(latest.get("envelope_reference")),
+                key=f"efile_envelope_{latest['filing_id']}",
+            )
+            court_case_number = st.text_input(
+                "Court case number (when assigned)",
+                value=clean_text(latest.get("court_case_number")),
+                key=f"efile_case_number_{latest['filing_id']}",
+            )
+        with c2:
+            current_status = latest.get("status") if latest.get("status") in EFILE_STATUS_OPTIONS else "READY_FOR_EFSP"
+            new_status = st.selectbox(
+                "Filing status",
+                EFILE_STATUS_OPTIONS,
+                index=EFILE_STATUS_OPTIONS.index(current_status),
+                key=f"efile_status_{latest['filing_id']}",
+            )
+            rejection_reason = st.text_area(
+                "Rejection/return reason",
+                value=clean_text(latest.get("rejection_reason")),
+                height=90,
+                key=f"efile_rejection_{latest['filing_id']}",
+            )
+            receipt_upload = st.file_uploader(
+                "EFSP receipt or court notice PDF",
+                type=["pdf"],
+                key=f"efile_receipt_file_{latest['filing_id']}",
+            )
+
+        if st.button("Update filing status", key=f"efile_update_{latest['filing_id']}"):
+            if new_status in {"SUBMITTED_TO_EFSP", "RECEIVED_BY_COURT", "ACCEPTED"} and not envelope_reference:
+                st.error("Enter the EFSP envelope/transaction number before marking the filing submitted or accepted.")
+            else:
+                update_efiling_record(
+                    conn,
+                    latest["filing_id"],
+                    status=new_status,
+                    provider_name=receipt_provider,
+                    envelope_reference=envelope_reference,
+                    court_case_number=court_case_number,
+                    rejection_reason=rejection_reason,
+                    receipt_pdf=receipt_upload.getvalue() if receipt_upload else None,
+                )
+                if new_status in {"SUBMITTED_TO_EFSP", "RECEIVED_BY_COURT", "ACCEPTED"}:
+                    update_native_complaint_module_status_conn(
+                        conn,
+                        clean_text(packet.sc100.get("case_id")),
+                        "submitted_to_small_claim_court",
+                        note=(
+                            f"{new_status.replace('_', ' ').title()} through {receipt_provider or 'EFSP'}; "
+                            f"envelope {envelope_reference}."
+                        ),
+                        meta={
+                            "filing_id": latest["filing_id"],
+                            "envelope_reference": envelope_reference,
+                            "court_case_number": court_case_number,
+                            "filing_status": new_status,
+                        },
+                    )
+                else:
+                    append_native_complaint_activity_conn(
+                        conn,
+                        clean_text(packet.sc100.get("case_id")),
+                        title=f"E-filing status: {new_status}",
+                        detail=rejection_reason or f"Filing record #{latest['filing_id']} updated.",
+                        meta={"filing_id": latest["filing_id"], "filing_status": new_status},
+                    )
+                st.success("Filing status updated in Complaint Warrior.")
+                st.rerun()
+
+    if temp_path:
+        try:
+            updated_db_bytes = Path(temp_path).read_bytes()
+            st.download_button(
+                "Download DB with e-filing records",
+                data=updated_db_bytes,
+                file_name="cw_store_with_small_claim_efilings.sqlite",
+                mime="application/x-sqlite3",
+                key=f"efile_download_db_{packet.sc100.get('case_id')}",
+            )
+        except Exception as exc:
+            st.warning(f"Could not prepare the updated database for download: {exc}")
 
 
 
@@ -2246,16 +3026,17 @@ def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Opti
                     packet_pdf=st.session_state.get("packet_pdf"),
                     filled_sc100_pdf=st.session_state.get("filled_sc100_pdf"),
                 )
-                small_status_updated = update_native_complaint_module_status_conn(
+                activity_saved = append_native_complaint_activity_conn(
                     conn,
                     save_info["complaint_id"],
-                    "submitted_to_small_claim_court",
-                    note=f"Small-claims packet #{save_info['packet_id']} saved into the Complaint Warrior database.",
-                    meta={"packet_id": save_info["packet_id"]},
+                    title="Small-claims packet prepared",
+                    detail=f"Small-claims packet #{save_info['packet_id']} saved; it has not yet been submitted to the court.",
+                    kind="prepared",
+                    meta={"packet_id": save_info["packet_id"], "submitted": False},
                 )
                 st.session_state["saved_packet_info"] = save_info
-                if small_status_updated:
-                    st.success(f"Saved packet #{save_info['packet_id']} for case {save_info['complaint_id']} and updated status to submitted to small claim court.")
+                if activity_saved:
+                    st.success(f"Saved packet #{save_info['packet_id']} for case {save_info['complaint_id']}. Status remains unsubmitted until an EFSP receipt is recorded.")
                 else:
                     st.success(f"Saved packet #{save_info['packet_id']} for case {save_info['complaint_id']} into small_claim_packets.")
             except Exception as exc:
@@ -2307,6 +3088,8 @@ def main() -> None:
         packet = editable_case_form(record, conn)
         if packet:
             downloads_ui(packet, conn, temp_path)
+            st.markdown("---")
+            efiling_ui(packet, conn, temp_path)
     finally:
         try:
             conn.close()
