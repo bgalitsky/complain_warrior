@@ -660,6 +660,7 @@ Rules:
             business_name_hint: Optional[str] = None,
             business_email_hint: Optional[str] = None,
             business_address_hint: Optional[str] = None,
+    vendor_phone: Optional[str] = None,
     ) -> str:
         """
         Main entry:
@@ -679,7 +680,31 @@ Rules:
         )
 
         call_script = (plan.get("call_script") or "").strip()
-        to_numbers = plan.get("to_numbers") or []
+        raw_explicit_phone = (vendor_phone or "").strip()
+        digits = re.sub(r"\D", "", raw_explicit_phone)
+        if len(digits) == 10:
+            explicit_phone = "+1" + digits
+        elif len(digits) == 11 and digits.startswith("1"):
+            explicit_phone = "+" + digits
+        elif raw_explicit_phone.startswith("+") and 8 <= len(digits) <= 15:
+            explicit_phone = "+" + digits
+        else:
+            explicit_phone = ""
+        if vendor_phone and not explicit_phone:
+            raise ValueError(f"Invalid explicit vendor_phone: {vendor_phone}")
+        if explicit_phone:
+            # User/stored contact is authoritative: bypass all discovered numbers.
+            to_numbers = [{
+                "number": explicit_phone,
+                "is_ivr": False,
+                "ivr_digits": "",
+                "ivr_wait": 10,
+                "label": "explicit Complaint Warrior business phone",
+                "confidence": 1.0,
+                "source": "complaint_warrior_stored_contact",
+            }]
+        else:
+            to_numbers = plan.get("to_numbers") or []
 
         if not call_script:
             src = (user_complaint or "").strip()
