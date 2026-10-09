@@ -1,0 +1,67 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/27.0.5 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36" version="27.0.5">
+  <diagram name="ComplaintWarriorMultiAgentArchitecture" id="0">
+    <mxGraphModel dx="1359" dy="945" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="orchestrator" value="Supervisory Orchestration Agent&#xa;&#xa;• Resolves Agent Conflicts&#xa;• Prioritizes Tasks&#xa;• Manages Escalation Order" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="40" y="90" width="420" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="memory" value="Shared Dispute Memory&#xa;&#xa;• Event Graphs&#xa;• Evidence Store&#xa;• Negotiation History&#xa;• Dispute-State Vectors&#xa;• Emotional-State Estimates" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+          <mxGeometry x="330" y="370" width="420" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer" value="Consumer Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="40" y="300" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="negotiation" value="Negotiation Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="40" y="410" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="legal" value="Legal Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="560" y="100" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="banking" value="Banking Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="700" y="220" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="social" value="Social Escalation Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="40" y="590" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="mental" value="Mental-State Prediction Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="310" y="680" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="company" value="Company Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="840" y="480" width="120" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="mediation" value="Mediation Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="700" y="680" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=3;endArrow=block;" parent="1" source="orchestrator" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="consumer" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="negotiation" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="legal" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="banking" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="social" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="mental" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="company" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;endArrow=block;" parent="1" source="mediation" target="memory" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

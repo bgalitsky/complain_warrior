@@ -5,12 +5,17 @@ import os
 import re
 import json
 import sqlite3
+import hashlib
+import uuid
+from functools import wraps
 from pathlib import Path
 from typing import List, Optional
 import time
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+from cw_auth import COOKIE_NAME, TOKEN_DB, session_email, revoke_session
 
 from text_processor import TextProcessing
 from complaint_manager_phone import (
@@ -23,7 +28,6 @@ from complaint_manager_phone import (
 
 APP_TITLE = "Complaint Warrior"
 UPLOAD_DIR = Path("cw_uploads")
-TOKEN_DB = os.environ.get("GMAIL_TOKEN_DB", "cw_gmail_tokens.sqlite")
 LOGO_PATH = os.environ.get("CW_LOGO_PATH", "complaint_warrior.png")
 
 
@@ -110,7 +114,7 @@ ASSISTANT_NAVIGATION = {
         "label": "Gmail connection",
         "kind": "section",
         "anchor": "cw-gmail",
-        "description": "Connects Gmail and selects the connected Gmail identity.",
+        "description": "Connects your own Gmail account.",
     },
     "execution_mode": {
         "label": "Execution mode",
@@ -454,21 +458,43 @@ def _selected_complaint_is_waiting_subscribed_flow() -> bool:
         return False
 
 
-def _list_gmail_token_keys(db_path: str) -> List[str]:
+def _require_login():
+    """Resolve identity from a server-issued cookie, never a widget or URL."""
     try:
-        con = sqlite3.connect(db_path)
-        con.execute("""
-          CREATE TABLE IF NOT EXISTS gmail_tokens(
-            key TEXT PRIMARY KEY,
-            token_json TEXT NOT NULL,
-            updated_at REAL NOT NULL
-          )
-        """)
-        rows = con.execute("SELECT key FROM gmail_tokens ORDER BY updated_at DESC").fetchall()
-        con.close()
-        return [r[0] for r in rows]
-    except Exception:
-        return []
+        secret = st.context.cookies.get(COOKIE_NAME)
+        email = session_email(secret, TOKEN_DB)
+    except (AttributeError, sqlite3.Error):
+        st.session_state.clear()
+        st.error("Sign-in is unavailable. Check the shared token database and Streamlit version.")
+        st.stop()
+    if not email:
+        st.session_state.clear()
+        st.title(APP_TITLE)
+        st.info("Sign in with Google to access your complaints and connect Gmail.")
+        base = os.environ.get("PUBLIC_BASE", "").rstrip("/")
+        if base:
+            st.link_button("Sign in with Google", f"{base}/auth/start")
+        else:
+            st.error("PUBLIC_BASE must be configured.")
+        st.stop()
+    if st.session_state.get("authenticated_email") != email:
+        # Drop drafts, uploads, selections, and cached manager on identity change.
+        st.session_state.clear()
+        st.session_state.authenticated_email = email
+    return email
+
+
+def _authenticated_callback(callback):
+    @wraps(callback)
+    def guarded(*args, **kwargs):
+        # Streamlit callbacks execute BEFORE main() on a rerun.
+        email = _require_login()
+        manager = st.session_state.get("manager")
+        if manager is None or manager.user_email != email or manager.gmail_user_key != email:
+            st.stop()
+        return callback(*args, **kwargs)
+    return guarded
+
 
 SUBSCRIPTION_DB = os.environ.get(
     "CW_SUBSCRIPTIONS_DB",
@@ -507,17 +533,19 @@ def _is_company_subscribed(company_name: str, db_path: str = SUBSCRIPTION_DB) ->
     con.close()
     return bool(row and int(row[0]) == 1)
 
-def _ensure_manager():
+def _ensure_manager(email):
     if "logs" not in st.session_state:
         st.session_state.logs = []
     if "tp" not in st.session_state:
         st.session_state.tp = TextProcessing()
     if "manager" not in st.session_state or st.session_state.manager is None:
-        st.session_state.manager = ComplaintWarriorManager(st.session_state.tp, log_cb=_log)
-    if "app_user_email" not in st.session_state:
-        st.session_state.app_user_email = ""
-    if "gmail_user_key" not in st.session_state:
-        st.session_state.gmail_user_key = "default"
+        manager = ComplaintWarriorManager(
+            st.session_state.tp, log_cb=_log, gmail_user_key=email, token_db_path=TOKEN_DB
+        )
+        manager.set_user(email)
+        st.session_state.manager = manager
+    st.session_state.app_user_email = email
+    st.session_state.gmail_user_key = email
     if "selected_complaint_id" not in st.session_state:
         st.session_state.selected_complaint_id = None
     if "selected_thread_id" not in st.session_state:
@@ -529,10 +557,13 @@ def _ensure_manager():
 
 
 def _save_uploads(files) -> List[str]:
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    email = _require_login()
+    user_dir = UPLOAD_DIR / hashlib.sha256(email.encode("utf-8")).hexdigest()
+    user_dir.mkdir(parents=True, exist_ok=True)
     saved = []
     for uf in files or []:
-        dst = UPLOAD_DIR / uf.name
+        filename = Path(uf.name.replace("\\", "/")).name
+        dst = user_dir / f"{uuid.uuid4().hex}_{filename}"
         dst.write_bytes(uf.getbuffer())
         saved.append(str(dst))
     return saved
@@ -652,6 +683,7 @@ def _new_complaint_policy_default() -> str:
     ) else "manual"
 
 
+@_authenticated_callback
 def _initialize_new_complaint_form() -> None:
     """Clear section 1 and put it into new-complaint mode."""
     current_user_name = (
@@ -753,6 +785,7 @@ def _sync_initial_demand_form(manager, selected_complaint_id: Optional[str]) -> 
             _load_complaint_into_initial_form(cs)
 
 
+@_authenticated_callback
 def _on_complaint_selector_change(label_to_id: dict[str, str]) -> None:
     label = st.session_state.get("complaint_selector_label")
     if label == NEW_COMPLAINT_LABEL:
@@ -769,6 +802,7 @@ def _on_complaint_selector_change(label_to_id: dict[str, str]) -> None:
         st.session_state.selected_thread_id = None
 
 
+@_authenticated_callback
 def _add_complaint_from_initial_form() -> None:
     """Create a complaint from widget state inside a Streamlit callback.
 
@@ -875,8 +909,9 @@ def _add_complaint_from_initial_form() -> None:
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+    email = _require_login()
     _init_state()
-    _ensure_manager()
+    _ensure_manager(email)
 
     # Header / logo
     c1, c2 = st.columns([0.14, 0.86])
@@ -887,7 +922,7 @@ def main():
         st.title(APP_TITLE)
         st.caption("Logical sequence: initial demand → negotiation → resolution check → resolved/escalated. Email and phone activity are shown together.")
 
-    # Sidebar: unchanged Gmail auth entry point
+    # The account comes only from the verified login session.
     PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "").rstrip("/")
     AUTH_GUIDE_URL = os.environ.get(
         "CW_AUTH_GUIDE_URL",
@@ -899,42 +934,18 @@ def main():
         st.info(outbound_email_mode_label())
         st.caption(outbound_email_mode_label())
         if PUBLIC_BASE:
-            st.markdown(f"[Connect Gmail]({PUBLIC_BASE}/auth/start)")
-            st.caption("First time setup")
+            st.link_button("Reconnect or switch Google account", f"{PUBLIC_BASE}/auth/start")
             st.markdown(f"📄 [Gmail Authentication Instructions (PDF)]({AUTH_GUIDE_URL})")
         else:
             st.warning("PUBLIC_BASE is not set (e.g. your ngrok URL). Set it so the Connect button can work.")
 
-        keys = _list_gmail_token_keys(TOKEN_DB)
-        if keys:
-            st.session_state.gmail_user_key = st.selectbox("Connected Gmail identity", keys, index=0)
-            try:
-                st.session_state.manager.set_gmail_user(st.session_state.gmail_user_key)
-                st.success(f"Using Gmail key: {st.session_state.gmail_user_key}")
-            except Exception as e:
-                st.error(str(e))
-        else:
-            st.info("No Gmail tokens found yet.")
+        st.success(f"Signed in as {email}")
+        if st.button("Sign out"):
+            revoke_session(st.context.cookies.get(COOKIE_NAME), TOKEN_DB)
+            st.session_state.clear()
+            st.rerun()
 
         st.divider()
-        st.header("App user")
-        st.session_state.app_user_email = st.text_input("Your email", value=st.session_state.app_user_email, placeholder="name@gmail.com").strip().lower()
-        if st.button("Use this account"):
-            try:
-                st.session_state.manager.set_user(st.session_state.app_user_email)
-                st.session_state.selected_complaint_id = None
-                st.session_state.selected_thread_id = None
-                st.session_state.initial_demand_selection_seen = None
-                st.session_state.initial_demand_mode = ""
-                st.session_state.case_assistant_pending_scroll = None
-                st.session_state.case_assistant_nav_notice = ""
-                st.session_state.pop("complaint_selector_label", None)
-                st.success(f"Active user: {st.session_state.app_user_email}")
-            except Exception as e:
-                st.error(str(e))
-
-        st.divider()
-        _section_anchor("execution_mode")
         st.header("Execution mode")
         st.session_state.mode = st.radio("Mode", ["manual", "automated"], index=0 if st.session_state.mode == "manual" else 1)
         st.session_state.trusted = st.toggle("Trusted", value=st.session_state.trusted, help="Trusted enables automatic sending plus GPT satisfaction fallback on mixed signals only.")
@@ -952,7 +963,7 @@ def main():
                 st.error(f"Automated step failed: {e}")
 
     if st.session_state.manager is None or not st.session_state.manager.user_email:
-        st.info("In the sidebar, set your app email and click **Use this account**.")
+        st.error("Your account could not be initialized. Please sign in again.")
         st.stop()
 
     if st.session_state.complaint_flash:

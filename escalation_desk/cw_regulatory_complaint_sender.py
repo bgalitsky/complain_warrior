@@ -1506,6 +1506,10 @@ def main() -> None:
         st.write(f"Subject: **{record.subject or 'Consumer complaint'}**")
         st.text_area("Complaint text used for drafting", value=record.display_text(), height=260, disabled=True)
 
+    # Local Playwright handoff is available before letter generation.
+    from bbb_workflow import render_bbb_panel
+    render_bbb_panel(record, st.session_state.loaded_db_path)
+
     # Routing instructions are also config-driven.
     jurisdiction_hint = cfg_get(
         "Routing",
