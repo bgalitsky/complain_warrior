@@ -1,0 +1,16 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>CW test agency — synthetic data only</title>
+<style>body{font:16px system-ui;max-width:800px;margin:40px auto}fieldset{margin:20px 0;padding:20px}label{display:block;margin:12px 0}input,textarea,select{display:block;padding:8px;width:90%}textarea{height:80px}</style>
+<h1>Sample consumer complaint form</h1><p>This is a local test page, not a government agency.</p>
+<form onsubmit="event.preventDefault();document.getElementById('receipt').textContent='MANUAL submit clicked'">
+<fieldset><legend>Your contact details</legend>
+<label>Full name<input name="name" autocomplete="name"></label>
+<label>Email<input name="email" type="email" autocomplete="email"></label>
+<label>State<select><option value="">Select state</option><option value="CA">California</option><option value="FL">Florida</option></select></label>
+</fieldset>
+<fieldset><legend>Business details</legend><label>Business name<input></label><label>Email<input type="email"></label></fieldset>
+<label>Complaint details<textarea></textarea></label><label>Requested resolution<textarea></textarea></label>
+<label>Category<select><option>Choose</option><option>Goods</option><option>Services</option></select></label>
+<label>Existing note<input value="Do not overwrite without approval"></label>
+<label>Password<input type="password"></label><label>Verification CAPTCHA<input name="captcha"></label>
+<label><input type="checkbox">I certify these facts</label><input type="file"><button>Submit manually</button>
+</form><p id="receipt"></p></html>

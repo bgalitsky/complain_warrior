@@ -50,7 +50,7 @@ except Exception:  # pragma: no cover
 APP_TITLE = "Small Claim Court Warrior"
 APP_SUBTITLE = "Generate a California small-claims packet after Complaint Warrior has exhausted pre-suit options."
 
-OFFICIAL_SC100_URL = "https://courts.ca.gov/sites/default/files/courts/default/2024-11/sc100.pdf"
+OFFICIAL_SC100_URL = "https://courts.ca.gov/documents/sc100.pdf"
 SMALL_CLAIMS_HELP_URL = "https://selfhelp.courts.ca.gov/small-claims/start-case/forms/fill-out-forms"
 SERVE_URL = "https://selfhelp.courts.ca.gov/small-claims/start-case/serve"
 FILE_URL = "https://selfhelp.courts.ca.gov/small-claims/start-case/file"
@@ -1428,100 +1428,23 @@ def extract_pdf_fields(pdf_bytes: bytes) -> list[str]:
 
 
 def default_field_map(field_names: Sequence[str], sc100: dict[str, Any]) -> dict[str, str]:
-    target_values = {
-        "plaintiff_name": sc100.get("plaintiff_name", ""),
-        "plaintiff_address": ", ".join([x for x in [sc100.get("plaintiff_street"), sc100.get("plaintiff_city"), sc100.get("plaintiff_state"), sc100.get("plaintiff_zip")] if x]),
-        "plaintiff_phone": sc100.get("plaintiff_phone", ""),
-        "plaintiff_email": sc100.get("plaintiff_email", ""),
-        "defendant_name": sc100.get("defendant_legal_name", ""),
-        "defendant_address": ", ".join([x for x in [sc100.get("defendant_street"), sc100.get("defendant_city"), sc100.get("defendant_state"), sc100.get("defendant_zip")] if x]),
-        "agent_for_service": sc100.get("agent_for_service", ""),
-        "amount": sc100.get("amount_text", ""),
-        "county": sc100.get("county", ""),
-        "county_basis": sc100.get("county_basis", ""),
-        "claim_summary": sc100.get("claim_summary", ""),
-        "claim_detail": sc100.get("claim_detail", ""),
-        "demand_date": sc100.get("demand_date", ""),
-    }
-
-    matchers = {
-        "plaintiff_name": ["plaintiff", "name"],
-        "plaintiff_address": ["plaintiff", "address"],
-        "plaintiff_phone": ["plaintiff", "phone"],
-        "plaintiff_email": ["plaintiff", "email"],
-        "defendant_name": ["defendant", "name"],
-        "defendant_address": ["defendant", "address"],
-        "agent_for_service": ["agent", "service"],
-        "amount": ["amount"],
-        "county": ["county"],
-        "county_basis": ["why", "county"],
-        "claim_summary": ["why", "claim"],
-        "claim_detail": ["describe", "claim"],
-        "demand_date": ["when", "asked"],
-    }
-
-    mapping: dict[str, str] = {}
-    for field_name in field_names:
-        nk = normalize_key(field_name)
-        chosen_value = ""
-        for target, words in matchers.items():
-            if all(normalize_key(w) in nk for w in words):
-                chosen_value = target_values[target]
-                break
-            if normalize_key(words[0]) in nk:
-                chosen_value = target_values[target]
-        mapping[field_name] = chosen_value
-    return mapping
+    from sc100_autofill import field_map
+    return field_map(field_names, sc100)
 
 
 def fill_pdf_form(pdf_bytes: bytes, field_value_map: dict[str, str]) -> bytes:
-    if PdfReader is None or PdfWriter is None:
-        raise RuntimeError("pypdf is not installed.")
+    from sc100_autofill import normalize_blank, fill_verified
+    return fill_verified(normalize_blank(pdf_bytes), field_value_map, flatten=True)
 
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer = PdfWriter()
-    writer.clone_document_from_reader(reader)
-    for page in writer.pages:
-        try:
-            # California courts commonly reject PDFs that retain active fillable fields.
-            # pypdf >= 5 supports flatten=True; keep a fallback for earlier versions.
-            try:
-                writer.update_page_form_field_values(
-                    page, field_value_map, auto_regenerate=False, flatten=True
-                )
-            except TypeError:
-                writer.update_page_form_field_values(page, field_value_map)
-        except Exception:
-            continue
 
-    # pypdf renders field appearances with flatten=True but can retain the
-    # AcroForm/widget dictionaries. Remove those dictionaries after rendering
-    # so the resulting PDF is no longer an interactive form.
-    for page in writer.pages:
-        try:
-            annots = page.get("/Annots")
-            if not annots:
-                continue
-            for idx in range(len(annots) - 1, -1, -1):
-                try:
-                    annot = annots[idx].get_object()
-                    if str(annot.get("/Subtype")) == "/Widget":
-                        del annots[idx]
-                except Exception:
-                    continue
-            if not annots and "/Annots" in page:
-                del page["/Annots"]
-        except Exception:
-            continue
-    try:
-        if "/AcroForm" in writer._root_object:
-            del writer._root_object["/AcroForm"]
-    except Exception:
-        pass
-
-    out = io.BytesIO()
-    writer.write(out)
-    return out.getvalue()
+def populate_sc100_session(blank_pdf: bytes, packet: FilingPacket) -> None:
+    from sc100_autofill import populate
+    for key in ('filled_sc100_pdf', 'editable_sc100_pdf', 'detected_pdf_fields'):
+        st.session_state.pop(key, None)
+    editable, flat, values = populate(blank_pdf, packet.sc100)
+    st.session_state['editable_sc100_pdf'] = editable
+    st.session_state['filled_sc100_pdf'] = flat
+    st.session_state['detected_pdf_fields'] = list(values)
 
 
 def make_packet_pdf(packet: FilingPacket) -> bytes:
@@ -2783,6 +2706,12 @@ def process_serving_pane(record: CaseRecord, packet: Optional[FilingPacket]) -> 
 
 
 def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPacket | None:
+    scope = (record.consumer_email, record.case_id)
+    if st.session_state.get('_sc100_scope') != scope:
+        for key in ('generated_packet', 'packet_pdf', 'filled_sc100_pdf', 'editable_sc100_pdf',
+                    'detected_pdf_fields', 'saved_packet_info', 'sc100_blank_upload'):
+            st.session_state.pop(key, None)
+        st.session_state['_sc100_scope'] = scope
     st.subheader("3) Review and generate court packet")
     tab1, tab2, tab_process, tab3, tab4 = st.tabs(["Intake", "SC-100 draft", "Process serving", "Evidence", "Workflow"])
 
@@ -2822,7 +2751,7 @@ def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPa
         col1, col2 = st.columns(2)
         with col1:
             plaintiff_name = st.text_input("Plaintiff name", value=saved_sc100.get("plaintiff_name") or record.consumer_name)
-            plaintiff_address = st.text_area("Plaintiff mailing address", value=plaintiff_address_default, height=90)
+            plaintiff_address = st.text_area("Plaintiff street address (verify before filing)", value=plaintiff_address_default, height=90)
             plaintiff_email = st.text_input("Plaintiff email", value=saved_sc100.get("plaintiff_email") or record.consumer_email)
             plaintiff_phone = st.text_input("Plaintiff phone", value=saved_sc100.get("plaintiff_phone") or record.consumer_phone)
         with col2:
@@ -2889,7 +2818,13 @@ def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPa
                 claim_detail=claim_detail,
             )
             st.session_state["generated_packet"] = packet
-            st.success("Packet generated below.")
+            for key in ('packet_pdf', 'filled_sc100_pdf', 'editable_sc100_pdf', 'detected_pdf_fields', 'saved_packet_info'):
+                st.session_state.pop(key, None)
+            try:
+                populate_sc100_session(fetch_official_sc100_pdf(), packet)
+                st.success("Packet and populated SC-100 generated. Review the editable PDF and complete unanswered items before filing.")
+            except Exception as exc:
+                st.warning(f"Packet generated, but SC-100 was not populated: {exc}. You can upload the official blank form in Downloads.")
 
     packet = st.session_state.get("generated_packet")
     if not isinstance(packet, FilingPacket) or packet.sc100.get("case_id") != record.case_id:
@@ -2941,6 +2876,12 @@ def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPa
 
 
 def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Optional[str]) -> None:
+    import sys
+    extension_dir = str(Path(__file__).resolve().parents[1] / "browser_extension")
+    if extension_dir not in sys.path:
+        sys.path.insert(0, extension_dir)
+    from cw_export import from_sc100, render_export_panel
+    render_export_panel(packet.sc100['case_id'], from_sc100(packet.sc100))
     st.subheader("4) Downloads")
     col1, col2 = st.columns(2)
     with col1:
@@ -2962,12 +2903,12 @@ def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Opti
     with col2:
         source_mode = st.radio(
             "SC-100 blank form source",
-            options=["Upload blank SC-100 PDF", "Fetch official blank SC-100 PDF"],
+            options=["Fetch official blank SC-100 PDF", "Upload blank SC-100 PDF"],
             horizontal=False,
         )
         uploaded_pdf = None
         if source_mode == "Upload blank SC-100 PDF":
-            uploaded_pdf = st.file_uploader("Upload blank official SC-100 PDF", type=["pdf"])
+            uploaded_pdf = st.file_uploader("Upload blank official SC-100 PDF", type=["pdf"], key="sc100_blank_upload")
         if st.button("Populate blank SC-100 PDF"):
             try:
                 if source_mode == "Upload blank SC-100 PDF":
@@ -2976,12 +2917,8 @@ def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Opti
                     blank_pdf = uploaded_pdf.getvalue()
                 else:
                     blank_pdf = fetch_official_sc100_pdf()
-                field_names = extract_pdf_fields(blank_pdf)
-                field_map = default_field_map(field_names, packet.sc100)
-                filled_pdf = fill_pdf_form(blank_pdf, field_map)
-                st.session_state["filled_sc100_pdf"] = filled_pdf
-                st.session_state["detected_pdf_fields"] = field_names
-                st.success("Best-effort SC-100 PDF generated. Review every field before filing.")
+                populate_sc100_session(blank_pdf, packet)
+                st.success("SC-100 populated and field values verified. Review and complete unanswered items before filing.")
             except Exception as exc:
                 st.error(f"Could not populate SC-100 PDF: {exc}")
 
@@ -2992,6 +2929,12 @@ def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Opti
                 file_name=f"sc100_filled_{packet.sc100['case_id']}.pdf",
                 mime="application/pdf",
             )
+
+    if st.session_state.get('editable_sc100_pdf'):
+        st.download_button('Download editable SC-100 for review',
+                           data=st.session_state['editable_sc100_pdf'],
+                           file_name=f"sc100_editable_{packet.sc100['case_id']}.pdf", mime='application/pdf')
+        st.info('Complete court location, incident date, eligibility/venue checkboxes, any additional parties, and signature in the editable PDF. The final demand date is not used as the incident date. Upload your completed PDF as the lead filing document below.')
 
     with st.expander("Detected PDF fields from blank SC-100", expanded=False):
         field_names = st.session_state.get("detected_pdf_fields")

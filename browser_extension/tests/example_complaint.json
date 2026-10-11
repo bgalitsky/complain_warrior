@@ -1,0 +1,15 @@
+{
+  "schema": "cw.form-assistant.v1",
+  "complaint_id": "DEMO-001",
+  "values": {
+    "consumer.full_name": "Alex Example",
+    "consumer.email": "alex@example.com",
+    "consumer.state": "CA",
+    "business.name": "Example Services LLC",
+    "business.email": "support@example.com",
+    "complaint.narrative": "I paid for a service that was not provided. This is synthetic test data.",
+    "complaint.requested_resolution": "Refund the unused service charge.",
+    "jurisdiction.country": "United States",
+    "jurisdiction.state": "California"
+  }
+}
