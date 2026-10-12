@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Complaint Warrior Form Assistant",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Click to fill known blank form fields from your selected CW complaint. Review on the website.",
   "minimum_chrome_version": "110",
   "permissions": [
@@ -17,7 +17,7 @@
     "type": "module"
   },
   "options_page": "options.html",
-  "optional_host_permissions": [
-    "https://*/*"
+  "host_permissions": [
+    "https://app.knowledge-trail.com/*"
   ]
 }

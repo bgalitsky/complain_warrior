@@ -2877,11 +2877,24 @@ def editable_case_form(record: CaseRecord, conn: sqlite3.Connection) -> FilingPa
 
 def downloads_ui(packet: FilingPacket, conn: sqlite3.Connection, temp_path: Optional[str]) -> None:
     import sys
-    extension_dir = str(Path(__file__).resolve().parents[1] / "browser_extension")
-    if extension_dir not in sys.path:
-        sys.path.insert(0, extension_dir)
-    from cw_export import from_sc100, render_export_panel
-    render_export_panel(packet.sc100['case_id'], from_sc100(packet.sc100))
+    # Support both the repository layout and flat deployments such as /prod.
+    app_dir = Path(__file__).resolve().parent
+    for helper_dir in (app_dir, app_dir.parent / "browser_extension"):
+        if str(helper_dir) not in sys.path:
+            sys.path.insert(0, str(helper_dir))
+    try:
+        from cw_export import from_sc100, render_export_panel
+    except ModuleNotFoundError as exc:
+        if exc.name != "cw_export":
+            raise
+        st.warning("Chrome Form Assistant export is unavailable. Place cw_export.py beside this app and restart. Existing features remain available.")
+    else:
+        import inspect
+        export_options = {}
+        if "db_path" in inspect.signature(render_export_panel).parameters:
+            export_options["db_path"] = conn.execute('PRAGMA database_list').fetchone()[2]
+        render_export_panel(packet.sc100['case_id'], from_sc100(packet.sc100), **export_options)
+
     st.subheader("4) Downloads")
     col1, col2 = st.columns(2)
     with col1:
