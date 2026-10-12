@@ -6,7 +6,7 @@ export const KEYS = [
   'business.name','business.email','business.phone','business.street','business.city','business.state',
   'business.postal_code','business.country','complaint.subject','complaint.narrative',
   'complaint.requested_resolution','complaint.amount','complaint.transaction_date',
-  'complaint.reference','jurisdiction.country','jurisdiction.state'
+  'complaint.reference','complaint.date','jurisdiction.country','jurisdiction.state'
 ];
 export function normalize(s) {
   return String(s || '').replace(/([a-z])([A-Z])/g,'$1 $2')
@@ -40,7 +40,7 @@ const TYPES = [
   ['full_name', /\b(full name|your name|name|nombre completo|nombre|nom)\b/]
 ];
 const AUTOCOMPLETE = {'name':'full_name','given-name':'first_name','family-name':'last_name',
-  'email':'email','tel':'phone','street-address':'street','address-line1':'street',
+  'email':'email','tel':'phone','tel-national':'phone','street-address':'street','address-line1':'street',
   'address-level2':'city','address-level1':'state','postal-code':'postal_code',
   'country':'country','country-name':'country','organization':'name'};
 const BUSINESS = /\b(business|company|merchant|trader|seller|defendant|respondent|supplier|empresa|comerciante|demandado|entreprise|professionnel)\b/;
@@ -51,12 +51,13 @@ export function propose(field, values) {
   const all = `${label} ${context}`;
   // Unrecognised labels remain manual. A number input is not necessarily an amount.
   const cases = [
-    ['complaint.requested_resolution', /\b(desired outcome|requested resolution|resolution sought|what.*want|remedy|remedies|resolucion|solucion|reparation)\b/],
-    ['complaint.narrative', /\b(complaint details|complaint description|describe.*(complaint|problem|incident)|what happened|narrative|details of.*complaint|descripcion.*(queja|reclamacion)|description.*(plainte|probleme))\b/],
-    ['complaint.subject', /\b(subject|complaint title|asunto|objet)\b/],
+    ['complaint.requested_resolution', /\b(desired outcome|requested resolution|resolution sought|resolution.*seeking|what.*want|remedy|remedies|resolucion|solucion|reparation)\b/],
+    ['complaint.narrative', /\b(complaint details|complaint description|describe.*(complaint|problem|incident|issue)|what happened|narrative|details of.*complaint|descripcion.*(queja|reclamacion)|description.*(plainte|probleme))\b/],
+    ['complaint.subject', /\b(subject|complaint title|nature of.*complaint|asunto|objet)\b/],
     ['complaint.amount', /\b(amount (claimed|paid|disputed)|disputed amount|claim amount|purchase price|importe|montant)\b/],
+    ['complaint.date', /\b(date of complaint|complaint date)\b/],
     ['complaint.transaction_date', /\b(transaction date|purchase date|date of purchase|fecha de compra)\b/],
-    ['complaint.reference', /\b(order number|booking reference|transaction reference|numero de pedido)\b/]
+    ['complaint.reference', /\b(order invoice number|invoice number|order number|booking reference|transaction reference|numero de pedido)\b/]
   ];
   for (const [key, pattern] of cases) if (pattern.test(label)) return suggestion(key, .95, 'Field label', field, values);
   const roleBusiness = BUSINESS.test(label) || (!CONSUMER.test(label) && BUSINESS.test(context));
@@ -85,4 +86,40 @@ function suggestion(key, confidence, reason, field, values) {
     value = opts[0].value;
   }
   return {key, value, confidence, reason};
+}
+
+// Automatic mode never replaces user edits or acts on declarations/buttons.
+export function autoPlan(fields, supplied) {
+  const values = {...supplied};
+  if ((!values['consumer.first_name'] || !values['consumer.last_name']) && values['consumer.full_name']) {
+    const parts = values['consumer.full_name'].trim().split(/\s+/);
+    if (parts.length === 2) {
+      values['consumer.first_name'] ||= parts[0];
+      values['consumer.last_name'] ||= parts[1];
+    }
+  }
+  const plan = [], skipped = [];
+  for (const field of fields) {
+    if (field.currentValue) { skipped.push({label:field.label, reason:'Existing value preserved'}); continue; }
+    const suggestion = propose(field, values);
+    if (!suggestion) { skipped.push({label:field.label, reason:'No unambiguous stored value'}); continue; }
+    let value = suggestion.value;
+    if (suggestion.key === 'complaint.date' || suggestion.key === 'complaint.transaction_date') {
+      const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+      const fmt = (field.dateFormat || field.placeholder || '').toLowerCase();
+      if (!iso) { skipped.push({label:field.label, reason:'Date format not recognised'}); continue; }
+      if (field.type === 'date' || fmt === 'yyyy-mm-dd') { /* already ISO */ }
+      else if (fmt === 'mmddyyyy' || fmt === 'mm-dd-yyyy' || fmt === 'mm/dd/yyyy') {
+        const sep = field.dateSeparator || (fmt.includes('/') ? '/' : '-');
+        value = [iso[2],iso[3],iso[1]].join(sep);
+      } else if (fmt === 'dd-mm-yyyy' || fmt === 'dd/mm/yyyy') {
+        const sep = fmt.includes('/') ? '/' : '-'; value = [iso[3],iso[2],iso[1]].join(sep);
+      } else { skipped.push({label:field.label, reason:'Date format unspecified'}); continue; }
+    }
+    if (field.maxLength >= 0 && value.length > field.maxLength) {
+      skipped.push({label:field.label, reason:'Stored text exceeds the field limit'}); continue;
+    }
+    plan.push({token:field.token, value, overwrite:false});
+  }
+  return {fields:plan, skipped};
 }

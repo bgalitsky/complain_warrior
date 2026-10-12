@@ -159,6 +159,12 @@ def oauth2callback():
         "scopes": list(creds.scopes or []),
     }
 
+    # A reconnect may omit a refresh token; preserve only this verified account's grant.
+    if not token_json["refresh_token"]:
+        previous = load_token(email) or {}
+        if previous.get("client_id") == token_json["client_id"]:
+            token_json["refresh_token"] = previous.get("refresh_token")
+
     # Multi-user: store under the actual Gmail address.
     save_token(email, token_json)
 
@@ -177,6 +183,16 @@ def auth_status():
     if not email:
         return jsonify({"connected": False}), 401
     return jsonify({"connected": load_token(email) is not None, "email": email})
+
+
+# The browser-extension API is optional; missing deployment files must not disable login.
+try:
+    from cw_extension_bridge import register_routes
+except ModuleNotFoundError as exc:
+    if exc.name != "cw_extension_bridge":
+        raise
+else:
+    register_routes(app, COOKIE_NAME, DB_PATH)
 
 
 if __name__ == "__main__":

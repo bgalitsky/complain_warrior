@@ -1363,12 +1363,24 @@ def main() -> None:
 
     # Local Chrome extension import; data leaves CW only via a reviewed download.
     import sys
-    extension_dir = str(Path(__file__).resolve().parents[1] / "browser_extension")
-    if extension_dir not in sys.path:
-        sys.path.insert(0, extension_dir)
-    from cw_export import from_escalation, render_export_panel
-    render_export_panel(record.complaint_id, from_escalation(record),
-                        verify_owner=lambda: require_owner(record.user_email))
+    # Support both the repository layout and flat deployments such as /prod.
+    app_dir = Path(__file__).resolve().parent
+    for helper_dir in (app_dir, app_dir.parent / "browser_extension"):
+        if str(helper_dir) not in sys.path:
+            sys.path.insert(0, str(helper_dir))
+    try:
+        from cw_export import from_escalation, render_export_panel
+    except ModuleNotFoundError as exc:
+        if exc.name != "cw_export":
+            raise
+        st.warning("Chrome Form Assistant export is unavailable. Place cw_export.py beside this app and restart. Existing features remain available.")
+    else:
+        import inspect
+        export_options = {"verify_owner": lambda: require_owner(record.user_email)}
+        if "db_path" in inspect.signature(render_export_panel).parameters:
+            export_options["db_path"] = st.session_state.loaded_db_path
+        render_export_panel(record.complaint_id, from_escalation(record), **export_options)
+
 
     # Local Playwright handoff is available before letter generation.
     from bbb_workflow import render_bbb_panel

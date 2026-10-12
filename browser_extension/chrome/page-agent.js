@@ -13,13 +13,20 @@
     const root = el.getRootNode();
     const labelled = (el.getAttribute('aria-labelledby') || '').split(/\s+/)
       .map(id => root.getElementById?.(id)?.textContent || '').join(' ');
-    const label = compact(Array.from(el.labels || []).map(labelText).join(' ') || labelled ||
-      el.getAttribute('aria-label') || el.placeholder || '');
+    // Jotform uses a parent question plus first/last/date sublabels.
+    const labels = Array.from(el.labels || []).map(labelText).join(' ');
+    const question = el.closest('.form-line')?.querySelector('.form-label')?.textContent || '';
+    const label = compact([question, labels, labelled, el.getAttribute('aria-label') || '']
+      .filter(Boolean).join(' ') || el.placeholder || '');
+    const group = el.closest('[role=group]');
+    const groupLabel = (group?.getAttribute('aria-labelledby') || '').split(/\s+/)
+      .map(id => root.getElementById?.(id)?.textContent || '').join(' ');
     const section = compact(el.closest('fieldset')?.querySelector('legend')?.textContent ||
-      el.closest('[role=group]')?.getAttribute('aria-label') ||
-      el.closest('form')?.getAttribute('aria-label') || '');
+      group?.getAttribute('aria-label') || groupLabel || el.closest('form')?.getAttribute('aria-label') || '');
     return {tag: el.tagName.toLowerCase(), type: el.type, label, section,
       name: el.name || '', id: el.id || '', autocomplete: el.autocomplete || '',
+      maxLength: el.maxLength ?? -1, placeholder: el.placeholder || '',
+      dateFormat: el.getAttribute('data-format') || '', dateSeparator: el.getAttribute('data-seperator') || '',
       options: el.tagName === 'SELECT' ? Array.from(el.options).map(o =>
         ({label: o.label, value: o.value, disabled: o.disabled || !!o.closest('optgroup')?.disabled})) : []};
   }
@@ -27,6 +34,11 @@
     if (!el.isConnected || el.disabled || el.matches(':disabled') || el.readOnly || el.multiple || el.closest('[inert]')) return false;
     const view = el.ownerDocument.defaultView;
     const style = view.getComputedStyle(el);
+    // Account for hidden ancestors, including Jotform's hidden date component inputs.
+    for (let node = el; node; node = node.parentElement) {
+      const css = view.getComputedStyle(node);
+      if (node.hidden || css.display === 'none' || css.visibility === 'hidden') return false;
+    }
     if (!el.getClientRects().length || style.visibility !== 'visible' || style.display === 'none') return false;
     if (el.tagName === 'INPUT' && !['text','email','tel','number','date','url'].includes(el.type)) return false;
     const f = info(el);
@@ -97,7 +109,9 @@
         el.dispatchEvent(new w.Event('input', {bubbles:true, composed:true}));
         el.dispatchEvent(new w.Event('change', {bubbles:true, composed:true}));
         await new Promise(resolve => setTimeout(resolve, 120));
-        const valid = el.isConnected && el.value === item.value;
+        const sameValue = el.value === item.value || (el.type === 'tel' &&
+          el.value.replace(/\D/g,'') === item.value.replace(/\D/g,'') && item.value.replace(/\D/g,'').length > 0);
+        const valid = el.isConnected && sameValue;
         results.push({token:item.token, status:valid ? 'filled' : 'unverified',
           message:valid ? (el.validationMessage || 'Value verified. Review it on the page.') : 'Page replaced or rejected this field. Inspect it manually.'});
         if (!valid) break;
@@ -109,5 +123,15 @@
     refs.clear(); snapshot = null;
     return results;
   }
-  globalThis.__cwFormAgent = {scan, fill};
+  function report(message) {
+    document.getElementById('__cw_fill_status')?.remove();
+    const box = document.createElement('div'); box.id = '__cw_fill_status';
+    box.setAttribute('role', 'status');
+    box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#12344d;color:white;padding:16px;border-radius:10px;max-width:430px;font:14px/1.5 system-ui;box-shadow:0 4px 24px #0005;white-space:pre-wrap';
+    const text = document.createElement('span'); text.textContent = message;
+    const close = document.createElement('button'); close.type='button'; close.textContent='Dismiss';
+    close.style.cssText='display:block;margin-top:8px;padding:5px 10px'; close.onclick=()=>box.remove();
+    box.append(text, close); document.body.append(box);
+  }
+  globalThis.__cwFormAgent = {scan, fill, report};
 })();
